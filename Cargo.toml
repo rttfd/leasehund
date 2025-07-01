@@ -11,19 +11,16 @@ license = "MIT"
 keywords = ["dhcp", "embedded", "no-std", "networking", "embassy"]
 readme = "README.md"
 
-
 [dependencies]
-defmt = "1.0.1"
 embassy-net = { version = "0.7.0", features = [
-    "defmt",
     "tcp",
     "udp",
     "dhcpv4",
     "medium-ethernet",
     "proto-ipv4",
 ] }
-embassy-time = { version = "0.4.0", features = ["defmt"] }
-heapless = { version = "0.8.0", features = ["defmt-03"] }
+embassy-time = "0.4.0"
+heapless = "0.8.0"
 smoltcp = { version = "0.12.0", default-features = false, features = [
     "proto-ipv4",
     "proto-dhcpv4",
@@ -31,7 +28,3 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-defmt-test = "0.3"
-defmt-rtt = "0.4.1"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
-embassy-executor = { version = "0.7.0", features = ["defmt"] }
