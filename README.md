@@ -28,7 +28,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-leasehund = "0.1.0"
+leasehund = "0.2.0"
 ```
 
 ## Usage
@@ -44,10 +44,10 @@ use embassy_net::Stack;
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     // Initialize your embassy network stack here
-    let stack = // ... your network stack initialization
-    
-    // Create DHCP server
-    let mut dhcp_server = DhcpServer::new(
+    let stack = /* ... your network stack initialization ... */;
+
+    // Create DHCP server with explicit const generics
+    let mut dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
         Ipv4Addr::new(192, 168, 1, 1),    // Server IP
         Ipv4Addr::new(255, 255, 255, 0),  // Subnet mask
         Ipv4Addr::new(192, 168, 1, 1),    // Router/Gateway
@@ -78,12 +78,30 @@ The DHCP server requires the following configuration parameters:
 
 ### Advanced Configuration
 
-The server behavior can be customized by modifying these constants in the source:
+
+### Advanced Configuration (Builder Pattern)
+
+You can use the builder API to customize all key DHCP server parameters at runtime (const generics for sizing):
 
 ```rust
-const MAX_CLIENTS: usize = 32;        // Maximum concurrent leases
-const LEASE_TIME: u32 = 86400;        // Lease duration in seconds (24 hours)
+use core::net::Ipv4Addr;
+use leasehund::{DhcpConfigBuilder, DhcpServer};
+
+let config: leasehund::DhcpConfig<4> = DhcpConfigBuilder::<4>::new()
+    .server_ip(Ipv4Addr::new(10, 0, 1, 1))
+    .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
+    .router(Ipv4Addr::new(10, 0, 1, 1))
+    .add_dns_server(Ipv4Addr::new(1, 1, 1, 1))
+    .add_dns_server(Ipv4Addr::new(1, 0, 0, 1))
+    .ip_pool(Ipv4Addr::new(10, 0, 100, 1), Ipv4Addr::new(10, 0, 199, 254))
+    .lease_time(7200) // 2 hours
+    .socket_buffer_size(2048)
+    .build();
+
+let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 ```
+
+**Note:** The maximum number of concurrent leases and DNS servers are now compile-time constants set via const generics (e.g., `DhcpServer::<32, 4>`).
 
 ## Supported DHCP Messages
 
@@ -107,7 +125,7 @@ The server automatically includes these standard DHCP options in responses:
 
 ## Protocol Compliance
 
-Leasehund is compliant with [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131) and [RFC 2132](https://www.rfc-editor.org/rfc/rfc2132). All DHCP packets include and check the required DHCP magic cookie (`0x63825363`, see [RFC 2132 section 2](https://www.rfc-editor.org/rfc/rfc2132#section-2)) for strict standards compliance.
+Leasehund is compliant with [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131) and [RFC 2132](https://www.rfc-editor.org/rfc/rfc2132). All DHCP packets include and check the required DHCP magic cookie (0x63825363, see [RFC 2132 section 2](https://www.rfc-editor.org/rfc/rfc2132#section-2)) for strict standards compliance.
 
 ## Architecture
 
@@ -115,7 +133,7 @@ Leasehund is compliant with [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131) a
 
 The server uses fixed-size data structures to ensure predictable memory usage:
 
-- **Lease Storage**: `FnvIndexMap` with maximum `MAX_CLIENTS` entries
+- **Lease Storage**: `FnvIndexMap` with maximum number of entries set by the const generic parameter (e.g., `DhcpServer::<32, 4>`, compile-time fixed)
 - **Packet Buffers**: 1KB RX/TX buffers for UDP socket
 - **Response Packets**: Maximum 576 bytes per DHCP response
 
@@ -131,7 +149,7 @@ The server uses fixed-size data structures to ensure predictable memory usage:
 ### Simple Home Network
 
 ```rust
-let dhcp_server = DhcpServer::new(
+let dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
     Ipv4Addr::new(192, 168, 1, 1),    // Router IP
     Ipv4Addr::new(255, 255, 255, 0),  // /24 network
     Ipv4Addr::new(192, 168, 1, 1),    // Gateway
@@ -144,7 +162,7 @@ let dhcp_server = DhcpServer::new(
 ### Corporate Network
 
 ```rust
-let dhcp_server = DhcpServer::new(
+let dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
     Ipv4Addr::new(10, 0, 1, 1),       // Server IP
     Ipv4Addr::new(255, 255, 0, 0),    // /16 network
     Ipv4Addr::new(10, 0, 1, 1),       // Gateway
@@ -157,10 +175,11 @@ let dhcp_server = DhcpServer::new(
 ## Limitations
 
 - **IPv4 Only**: IPv6 is not supported
-- **Fixed Lease Time**: 24-hour lease duration (configurable at compile time)
+- **Lease Time**: Configurable at runtime via `DhcpConfig`/`DhcpConfigBuilder` (default 24 hours)
+- **Sizing**: Maximum clients and DNS servers are compile-time constants set via const generics (e.g., `DhcpServer::<32, 4>`)
 - **Basic Options**: Limited to essential DHCP options
 - **No Relay**: DHCP relay functionality not implemented
-- **Client Limit**: Maximum of 32 concurrent clients (configurable)
+- **Client Limit**: Maximum of 32 concurrent clients (compile-time fixed, set via const generics, e.g., `DhcpServer::<32, 4>`)
 
 ## Requirements
 

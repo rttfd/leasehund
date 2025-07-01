@@ -11,7 +11,7 @@
 //! ## Protocol Compliance
 //!
 //! Leasehund is compliant with [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131) and [RFC 2132](https://www.rfc-editor.org/rfc/rfc2132),
-//! including strict checking and emission of the DHCP magic cookie ([`DHCP_MAGIC`]) in all packets as required by the standard.
+//! including strict checking and emission of the DHCP magic cookie (0x63825363) in all packets as required by the standard.
 //!
 //! ## Features
 //!
@@ -32,9 +32,10 @@
 //! use core::net::Ipv4Addr;
 //! use leasehund::DhcpServer;
 //! use embassy_net::Stack;
+//! use leasehund::DhcpConfig;
 //!
 //! # async fn example(stack: Stack<'static>) {
-//! let mut dhcp_server = DhcpServer::new_with_dns(
+//! let mut dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
 //!     Ipv4Addr::new(192, 168, 1, 1),    // Server IP
 //!     Ipv4Addr::new(255, 255, 255, 0),  // Subnet mask
 //!     Ipv4Addr::new(192, 168, 1, 1),    // Router/Gateway
@@ -54,9 +55,10 @@
 //! use core::net::Ipv4Addr;
 //! use leasehund::{DhcpServer, DhcpConfigBuilder};
 //! use embassy_net::Stack;
+//! use leasehund::DhcpConfig;
 //!
 //! # async fn example(stack: Stack<'static>) {
-//! let config = DhcpConfigBuilder::new()
+//! let config: DhcpConfig<4> = DhcpConfigBuilder::new()
 //!     .server_ip(Ipv4Addr::new(10, 0, 1, 1))
 //!     .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
 //!     .router(Ipv4Addr::new(10, 0, 1, 1))
@@ -70,7 +72,7 @@
 //!     .lease_time(7200)    // 2 hours
 //!     .build();
 //!
-//! let mut dhcp_server = DhcpServer::with_config(config);
+//! let mut dhcp_server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 //! dhcp_server.run(stack).await;
 //! # }
 //! ```
@@ -85,12 +87,12 @@
 //!
 //! ## Limitations
 //!
-//! - Maximum of 32 concurrent client leases (configurable via `MAX_CLIENTS`)
-//! - Configurable lease time (default: 24 hours)
-//! - Support for multiple DNS servers (up to 4)
+//! - Maximum number of concurrent client leases is compile-time fixed via const generics (e.g., `DhcpServer::<32, 4>`, see examples)
+//! - Lease time, buffer size, and DNS servers are configurable at runtime via [`DhcpConfig`] / [`DhcpConfigBuilder`]
+//! - Support for multiple DNS servers (up to 4, set via const generics, e.g., `DhcpConfig::<4>`, see examples)
 //! - Optional router/gateway configuration
 //! - IPv4 only
-//! - Fixed UDP buffer sizes (1024 bytes)
+//! - Fixed UDP buffer sizes (1024 bytes by default, configurable)
 //!
 //! ## Network Configuration
 //!
@@ -101,7 +103,7 @@
 //! ## Memory Usage
 //!
 //! The server uses a fixed-size hash map to store lease information, with a maximum
-//! of `MAX_CLIENTS` entries. Each lease entry contains:
+//! number of entries set by the `MAX_CLIENTS` const generic parameter (e.g., `DhcpServer::<32, 4>`). Each lease entry contains:
 //! - IPv4 address (4 bytes)
 //! - MAC address (6 bytes)  
 //! - Lease expiration timestamp (8 bytes)
@@ -116,23 +118,19 @@ use core::net::Ipv4Addr;
 use embassy_net::Stack;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Timer};
-use heapless::{FnvIndexMap, Vec};
+use heapless::Vec;
 use smoltcp::phy::PacketMeta;
 
 /// Standard DHCP server port (RFC 2131)
 const DHCP_SERVER_PORT: u16 = 67;
-/// Standard DHCP client port (RFC 2131)  
+/// Standard DHCP client port (RFC 2131)
 const DHCP_CLIENT_PORT: u16 = 68;
-/// Maximum number of concurrent DHCP client leases
-const MAX_CLIENTS: usize = 32;
-/// Default lease time in seconds (24 hours)
-const LEASE_TIME: u32 = 86400; // 24 hours in seconds
 
-/// Default buffer size for UDP socket operations
+// Default values for DHCP server configuration (used for compile-time sizing)
+const DEFAULT_MAX_CLIENTS: usize = 32;
+const DEFAULT_MAX_DNS_SERVERS: usize = 4;
+const DEFAULT_LEASE_TIME: u32 = 86400; // 24 hours in seconds
 const DEFAULT_SOCKET_BUFFER_SIZE: usize = 1024;
-
-/// Maximum number of DNS servers that can be configured
-const MAX_DNS_SERVERS: usize = 4;
 
 /// Configuration options for the DHCP server
 ///
@@ -146,11 +144,11 @@ const MAX_DNS_SERVERS: usize = 4;
 /// use leasehund::{DhcpConfig, DhcpServer};
 /// use heapless::Vec;
 ///
-/// let mut dns_servers = Vec::new();
-/// dns_servers.push(Ipv4Addr::new(8, 8, 8, 8)).ok();
-/// dns_servers.push(Ipv4Addr::new(8, 8, 4, 4)).ok();
+/// let mut dns_servers = heapless::Vec::<core::net::Ipv4Addr, 4>::new();
+/// dns_servers.push(core::net::Ipv4Addr::new(8, 8, 8, 8)).ok();
+/// dns_servers.push(core::net::Ipv4Addr::new(8, 8, 4, 4)).ok();
 ///
-/// let config = DhcpConfig {
+/// let config: DhcpConfig<4> = DhcpConfig {
 ///     server_ip: Ipv4Addr::new(192, 168, 1, 1),
 ///     subnet_mask: Ipv4Addr::new(255, 255, 255, 0),
 ///     router: Some(Ipv4Addr::new(192, 168, 1, 1)),
@@ -161,10 +159,10 @@ const MAX_DNS_SERVERS: usize = 4;
 ///     socket_buffer_size: 1024,
 /// };
 ///
-/// let server = DhcpServer::with_config(config);
+/// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 /// ```
 #[derive(Clone, Debug)]
-pub struct DhcpConfig {
+pub struct DhcpConfig<const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS> {
     /// The IP address of this DHCP server
     pub server_ip: Ipv4Addr,
     /// Subnet mask to assign to clients
@@ -172,7 +170,7 @@ pub struct DhcpConfig {
     /// Default gateway/router IP address to assign to clients (optional)
     pub router: Option<Ipv4Addr>,
     /// List of DNS server IP addresses to assign to clients
-    pub dns_servers: Vec<Ipv4Addr, MAX_DNS_SERVERS>,
+    pub dns_servers: heapless::Vec<Ipv4Addr, MAX_DNS>,
     /// Start of the IP address pool for client assignment
     pub ip_pool_start: Ipv4Addr,
     /// End of the IP address pool for client assignment
@@ -183,11 +181,10 @@ pub struct DhcpConfig {
     pub socket_buffer_size: usize,
 }
 
-impl Default for DhcpConfig {
+impl<const MAX_DNS: usize> Default for DhcpConfig<MAX_DNS> {
     fn default() -> Self {
-        let mut dns_servers = Vec::new();
-        dns_servers.push(Ipv4Addr::new(8, 8, 8, 8)).ok(); // Google DNS
-
+        let mut dns_servers = heapless::Vec::new();
+        let _ = dns_servers.push(Ipv4Addr::new(8, 8, 8, 8)); // Google DNS
         Self {
             server_ip: Ipv4Addr::new(192, 168, 1, 1),
             subnet_mask: Ipv4Addr::new(255, 255, 255, 0),
@@ -195,7 +192,7 @@ impl Default for DhcpConfig {
             dns_servers,
             ip_pool_start: Ipv4Addr::new(192, 168, 1, 100),
             ip_pool_end: Ipv4Addr::new(192, 168, 1, 200),
-            lease_time: LEASE_TIME,
+            lease_time: DEFAULT_LEASE_TIME,
             socket_buffer_size: DEFAULT_SOCKET_BUFFER_SIZE,
         }
     }
@@ -211,7 +208,7 @@ impl Default for DhcpConfig {
 /// use core::net::Ipv4Addr;
 /// use leasehund::{DhcpConfigBuilder, DhcpServer};
 ///
-/// let config = DhcpConfigBuilder::new()
+/// let config: leasehund::DhcpConfig<4> = DhcpConfigBuilder::<4>::new()
 ///     .server_ip(Ipv4Addr::new(10, 0, 1, 1))
 ///     .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
 ///     .router(Ipv4Addr::new(10, 0, 1, 1))
@@ -224,14 +221,14 @@ impl Default for DhcpConfig {
 ///     .lease_time(7200) // 2 hours
 ///     .build();
 ///
-/// let server = DhcpServer::with_config(config);
+/// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 /// ```
 #[derive(Clone, Debug)]
-pub struct DhcpConfigBuilder {
-    config: DhcpConfig,
+pub struct DhcpConfigBuilder<const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS> {
+    config: DhcpConfig<MAX_DNS>,
 }
 
-impl DhcpConfigBuilder {
+impl<const MAX_DNS: usize> DhcpConfigBuilder<MAX_DNS> {
     /// Creates a new configuration builder with default values
     #[must_use]
     pub fn new() -> Self {
@@ -242,39 +239,34 @@ impl DhcpConfigBuilder {
 
     /// Sets the DHCP server IP address
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn server_ip(mut self, ip: Ipv4Addr) -> Self {
+    pub const fn server_ip(mut self, ip: Ipv4Addr) -> Self {
         self.config.server_ip = ip;
         self
     }
 
     /// Sets the subnet mask
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn subnet_mask(mut self, mask: Ipv4Addr) -> Self {
+    pub const fn subnet_mask(mut self, mask: Ipv4Addr) -> Self {
         self.config.subnet_mask = mask;
         self
     }
 
     /// Sets the default gateway/router IP address
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn router(mut self, router: Ipv4Addr) -> Self {
+    pub const fn router(mut self, router: Ipv4Addr) -> Self {
         self.config.router = Some(router);
         self
     }
 
     /// Removes the router option (no default gateway)
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn no_router(mut self) -> Self {
+    pub const fn no_router(mut self) -> Self {
         self.config.router = None;
         self
     }
 
     /// Adds a DNS server to the configuration
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
     pub fn add_dns_server(mut self, dns: Ipv4Addr) -> Self {
         let _ = self.config.dns_servers.push(dns);
         self
@@ -282,7 +274,6 @@ impl DhcpConfigBuilder {
 
     /// Clears all DNS servers
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
     pub fn clear_dns_servers(mut self) -> Self {
         self.config.dns_servers.clear();
         self
@@ -290,8 +281,7 @@ impl DhcpConfigBuilder {
 
     /// Sets the IP address pool range
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn ip_pool(mut self, start: Ipv4Addr, end: Ipv4Addr) -> Self {
+    pub const fn ip_pool(mut self, start: Ipv4Addr, end: Ipv4Addr) -> Self {
         self.config.ip_pool_start = start;
         self.config.ip_pool_end = end;
         self
@@ -299,73 +289,59 @@ impl DhcpConfigBuilder {
 
     /// Sets the lease time in seconds
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn lease_time(mut self, seconds: u32) -> Self {
+    pub const fn lease_time(mut self, seconds: u32) -> Self {
         self.config.lease_time = seconds;
         self
     }
 
     /// Sets the UDP socket buffer size
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn socket_buffer_size(mut self, size: usize) -> Self {
+    pub const fn socket_buffer_size(mut self, size: usize) -> Self {
         self.config.socket_buffer_size = size;
         self
     }
 
     /// Builds the final configuration
     #[must_use]
-    pub fn build(self) -> DhcpConfig {
+    pub fn build(self) -> DhcpConfig<MAX_DNS> {
         self.config
     }
 }
 
-impl Default for DhcpConfigBuilder {
+impl<const MAX_DNS: usize> Default for DhcpConfigBuilder<MAX_DNS> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 // DHCP Message Types (RFC 2131)
-/// DHCP Discover message type
+// Internal DHCP message type codes (RFC 2131)
 const DHCP_DISCOVER: u8 = 1;
-/// DHCP Offer message type
 const DHCP_OFFER: u8 = 2;
-/// DHCP Request message type
 const DHCP_REQUEST: u8 = 3;
-/// DHCP Acknowledgment message type
 const DHCP_ACK: u8 = 5;
-/// DHCP Release message type
 const DHCP_RELEASE: u8 = 7;
 
 // DHCP Options (RFC 2132)
-/// Subnet Mask option code
+// Internal DHCP option codes (RFC 2132)
 const OPTION_SUBNET_MASK: u8 = 1;
-/// Router option code
 const OPTION_ROUTER: u8 = 3;
-/// Domain Name Server option code
 const OPTION_DNS_SERVER: u8 = 6;
-/// IP Address Lease Time option code
 const OPTION_LEASE_TIME: u8 = 51;
-/// DHCP Message Type option code
 const OPTION_MESSAGE_TYPE: u8 = 53;
-/// Server Identifier option code
 const OPTION_SERVER_ID: u8 = 54;
-
-/// End of options marker
 const OPTION_END: u8 = 255;
 
-/// The standard DHCP magic cookie (0x63825363).
-///
-/// This value is required by RFC 2132 section 2 (see <https://www.rfc-editor.org/rfc/rfc2132#section-2>),
-/// and is used to identify DHCP packets and options. All incoming packets are checked for this value.
-pub(crate) const DHCP_MAGIC: [u8; 4] = [0x63, 0x82, 0x53, 0x63];
+// The standard DHCP magic cookie (0x63825363).
+// This value is required by RFC 2132 section 2 (see <https://www.rfc-editor.org/rfc/rfc2132#section-2>),
+// and is used to identify DHCP packets and options. All incoming packets are checked for this value.
+const DHCP_MAGIC: [u8; 4] = [0x63, 0x82, 0x53, 0x63];
 
-/// DHCP packet structure as defined in RFC 2131 <https://www.rfc-editor.org/rfc/rfc2131>
+/// DHCP packet structure as defined in [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131)
 ///
 /// This represents the fixed portion of a DHCP message, followed by
 /// variable-length options. The structure is packed to ensure correct
-/// wire format representation.
+/// wire format representation. The `magic` field is always set to the standard DHCP magic cookie (0x63825363).
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct DhcpPacket {
@@ -452,7 +428,7 @@ struct LeaseEntry {
 /// use core::net::Ipv4Addr;
 /// use leasehund::DhcpServer;
 ///
-/// let server = DhcpServer::new(
+/// let server: DhcpServer<32, 4> = DhcpServer::new(
 ///     Ipv4Addr::new(192, 168, 1, 1),    // Server IP
 ///     Ipv4Addr::new(255, 255, 255, 0),  // Subnet mask  
 ///     Ipv4Addr::new(192, 168, 1, 1),    // Gateway
@@ -468,7 +444,7 @@ struct LeaseEntry {
 /// use core::net::Ipv4Addr;
 /// use leasehund::{DhcpServer, DhcpConfigBuilder};
 ///
-/// let config = DhcpConfigBuilder::new()
+/// let config: leasehund::DhcpConfig<4> = DhcpConfigBuilder::<4>::new()
 ///     .server_ip(Ipv4Addr::new(10, 0, 1, 1))
 ///     .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
 ///     .router(Ipv4Addr::new(10, 0, 1, 1))
@@ -478,16 +454,19 @@ struct LeaseEntry {
 ///     .lease_time(7200) // 2 hours
 ///     .build();
 ///
-/// let server = DhcpServer::with_config(config);
+/// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 /// ```
-pub struct DhcpServer {
+pub struct DhcpServer<
+    const MAX_CLIENTS: usize = DEFAULT_MAX_CLIENTS,
+    const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS,
+> {
     /// Server configuration
-    config: DhcpConfig,
+    config: DhcpConfig<MAX_DNS>,
     /// Hash map storing active leases, keyed by client MAC address
-    leases: FnvIndexMap<[u8; 6], LeaseEntry, MAX_CLIENTS>,
+    leases: heapless::FnvIndexMap<[u8; 6], LeaseEntry, MAX_CLIENTS>,
 }
 
-impl DhcpServer {
+impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX_DNS> {
     /// Creates a new DHCP server with the specified configuration
     ///
     /// # Arguments
@@ -509,7 +488,7 @@ impl DhcpServer {
     /// use core::net::Ipv4Addr;
     /// use leasehund::DhcpServer;
     ///
-    /// let server = DhcpServer::new(
+    /// let server: DhcpServer<32, 4> = DhcpServer::new(
     ///     Ipv4Addr::new(192, 168, 1, 1),    // Server IP
     ///     Ipv4Addr::new(255, 255, 255, 0),  // Subnet mask
     ///     Ipv4Addr::new(192, 168, 1, 1),    // Gateway
@@ -527,21 +506,19 @@ impl DhcpServer {
         ip_pool_start: Ipv4Addr,
         ip_pool_end: Ipv4Addr,
     ) -> Self {
-        // For const fn, we need to create config manually without using Vec methods
-        let config = DhcpConfig {
+        let config = DhcpConfig::<MAX_DNS> {
             server_ip,
             subnet_mask,
             router: Some(router),
-            dns_servers: Vec::new(), // Will be empty in const context
+            dns_servers: heapless::Vec::new(),
             ip_pool_start,
             ip_pool_end,
-            lease_time: LEASE_TIME,
+            lease_time: DEFAULT_LEASE_TIME,
             socket_buffer_size: DEFAULT_SOCKET_BUFFER_SIZE,
         };
-
         Self {
             config,
-            leases: FnvIndexMap::new(),
+            leases: heapless::FnvIndexMap::new(),
         }
     }
 
@@ -569,7 +546,7 @@ impl DhcpServer {
     /// use core::net::Ipv4Addr;
     /// use leasehund::DhcpServer;
     ///
-    /// let server = DhcpServer::new_with_dns(
+    /// let server = DhcpServer::<32, 4>::new_with_dns(
     ///     Ipv4Addr::new(192, 168, 1, 1),    // Server IP
     ///     Ipv4Addr::new(255, 255, 255, 0),  // Subnet mask
     ///     Ipv4Addr::new(192, 168, 1, 1),    // Gateway
@@ -587,23 +564,21 @@ impl DhcpServer {
         ip_pool_start: Ipv4Addr,
         ip_pool_end: Ipv4Addr,
     ) -> Self {
-        let mut dns_servers = Vec::new();
+        let mut dns_servers = heapless::Vec::new();
         let _ = dns_servers.push(dns_server);
-
-        let config = DhcpConfig {
+        let config = DhcpConfig::<MAX_DNS> {
             server_ip,
             subnet_mask,
             router: Some(router),
             dns_servers,
             ip_pool_start,
             ip_pool_end,
-            lease_time: LEASE_TIME,
+            lease_time: DEFAULT_LEASE_TIME,
             socket_buffer_size: DEFAULT_SOCKET_BUFFER_SIZE,
         };
-
         Self {
             config,
-            leases: FnvIndexMap::new(),
+            leases: heapless::FnvIndexMap::new(),
         }
     }
 
@@ -627,7 +602,7 @@ impl DhcpServer {
     /// use core::net::Ipv4Addr;
     /// use leasehund::{DhcpServer, DhcpConfigBuilder};
     ///
-    /// let config = DhcpConfigBuilder::new()
+    /// let config = DhcpConfigBuilder::<4>::new()
     ///     .server_ip(Ipv4Addr::new(10, 0, 1, 1))
     ///     .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
     ///     .router(Ipv4Addr::new(10, 0, 1, 1))
@@ -636,21 +611,17 @@ impl DhcpServer {
     ///     .lease_time(7200)
     ///     .build();
     ///
-    /// let server = DhcpServer::with_config(config);
+    /// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
     /// ```
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn with_config(config: DhcpConfig) -> Self {
-        Self {
-            config,
-            leases: FnvIndexMap::new(),
-        }
+    pub const fn with_config(config: DhcpConfig<MAX_DNS>) -> Self {
+        let leases = heapless::FnvIndexMap::new();
+        Self { config, leases }
     }
 
     /// Gets a reference to the current configuration
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn config(&self) -> &DhcpConfig {
+    pub const fn config(&self) -> &DhcpConfig<MAX_DNS> {
         &self.config
     }
 
@@ -685,11 +656,11 @@ impl DhcpServer {
     /// use leasehund::{DhcpConfig, DhcpServer};
     /// use heapless::Vec;
     ///
-    /// let mut dns_servers = Vec::new();
-    /// dns_servers.push(Ipv4Addr::new(8, 8, 8, 8)).ok();
-    /// dns_servers.push(Ipv4Addr::new(8, 8, 4, 4)).ok();
+    /// let mut dns_servers = heapless::Vec::<core::net::Ipv4Addr, 4>::new();
+    /// dns_servers.push(core::net::Ipv4Addr::new(8, 8, 8, 8)).ok();
+    /// dns_servers.push(core::net::Ipv4Addr::new(8, 8, 4, 4)).ok();
     ///
-    /// let config = DhcpConfig {
+    /// let config: DhcpConfig<4> = DhcpConfig {
     ///     server_ip: Ipv4Addr::new(192, 168, 1, 1),
     ///     subnet_mask: Ipv4Addr::new(255, 255, 255, 0),
     ///     router: Some(Ipv4Addr::new(192, 168, 1, 1)),
@@ -700,7 +671,7 @@ impl DhcpServer {
     ///     socket_buffer_size: 1024,
     /// };
     ///
-    /// let server = DhcpServer::with_config(config);
+    /// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
     /// ```
     /// Finds the next available IP address in the configured pool
     ///
@@ -716,18 +687,24 @@ impl DhcpServer {
     ///
     /// ```rust
     /// use core::net::Ipv4Addr;
-    /// use leasehund::DhcpServer;
-    /// // This test only checks that the function returns an IP in the pool when no leases exist.
-    /// let server = DhcpServer::new_with_dns(
-    ///     Ipv4Addr::new(10, 0, 0, 1),
-    ///     Ipv4Addr::new(255, 255, 255, 0),
-    ///     Ipv4Addr::new(10, 0, 0, 1),
-    ///     Ipv4Addr::new(1, 1, 1, 1),
-    ///     Ipv4Addr::new(10, 0, 0, 100),
-    ///     Ipv4Addr::new(10, 0, 0, 102),
-    /// );
+    /// use leasehund::{DhcpConfig, DhcpServer};
+    /// use heapless::Vec;
+    /// let mut dns_servers = heapless::Vec::<core::net::Ipv4Addr, 4>::new();
+    /// dns_servers.push(core::net::Ipv4Addr::new(1, 1, 1, 1)).ok();
+    /// let config: DhcpConfig<4> = DhcpConfig {
+    ///     server_ip: Ipv4Addr::new(10, 0, 0, 1),
+    ///     subnet_mask: Ipv4Addr::new(255, 255, 255, 0),
+    ///     router: Some(Ipv4Addr::new(10, 0, 0, 1)),
+    ///     dns_servers,
+    ///     ip_pool_start: Ipv4Addr::new(10, 0, 0, 100),
+    ///     ip_pool_end: Ipv4Addr::new(10, 0, 0, 102),
+    ///     lease_time: 3600,
+    ///     socket_buffer_size: 1024,
+    /// };
+    /// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
     /// let next = server.get_next_available_ip();
     /// assert!(matches!(next, Some(ip) if ip == Ipv4Addr::new(10, 0, 0, 100)));
+    ///
     /// ```
     pub fn get_next_available_ip(&self) -> Option<Ipv4Addr> {
         let start = u32::from(self.config.ip_pool_start);
@@ -963,7 +940,7 @@ impl DhcpServer {
     /// use core::net::Ipv4Addr;
     ///
     /// # async fn example(stack: Stack<'static>) {
-    /// let mut server = DhcpServer::new(
+    /// let mut server = DhcpServer::<32, 4>::new(
     ///     Ipv4Addr::new(192, 168, 1, 1),
     ///     Ipv4Addr::new(255, 255, 255, 0),
     ///     Ipv4Addr::new(192, 168, 1, 1),
@@ -978,8 +955,8 @@ impl DhcpServer {
     /// ```
     #[allow(clippy::future_not_send)]
     pub async fn run(&mut self, stack: Stack<'_>) -> ! {
-        let mut rx_buffer = [0; 1024];
-        let mut tx_buffer = [0; 1024];
+        let mut rx_buffer = [0; DEFAULT_SOCKET_BUFFER_SIZE];
+        let mut tx_buffer = [0; DEFAULT_SOCKET_BUFFER_SIZE];
         let mut rx_meta = [PacketMetadata::EMPTY; 16];
         let mut tx_meta = [PacketMetadata::EMPTY; 16];
         let mut socket = UdpSocket::new(
@@ -1004,9 +981,13 @@ impl DhcpServer {
 mod tests {
     use core::net::Ipv4Addr;
 
+    type TestServer = super::DhcpServer<2, 2>;
+    type TestConfig = super::DhcpConfig<2>;
+    type TestBuilder = super::DhcpConfigBuilder<2>;
+
     #[test]
     fn dhcp_config_builder_basic() {
-        let config = super::DhcpConfigBuilder::new()
+        let config = TestBuilder::new()
             .clear_dns_servers()
             .server_ip(Ipv4Addr::new(10, 0, 0, 1))
             .subnet_mask(Ipv4Addr::new(255, 255, 255, 0))
@@ -1029,7 +1010,7 @@ mod tests {
 
     #[test]
     fn dhcp_server_new_with_dns() {
-        let server = super::DhcpServer::new_with_dns(
+        let server = TestServer::new_with_dns(
             Ipv4Addr::new(192, 168, 1, 1),
             Ipv4Addr::new(255, 255, 255, 0),
             Ipv4Addr::new(192, 168, 1, 1),
@@ -1045,7 +1026,7 @@ mod tests {
 
     #[test]
     fn dhcp_server_ip_pool_full() {
-        let mut server = super::DhcpServer::new_with_dns(
+        let mut server = TestServer::new_with_dns(
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(255, 255, 255, 0),
             Ipv4Addr::new(10, 0, 0, 1),
@@ -1059,7 +1040,7 @@ mod tests {
             let lease = super::LeaseEntry {
                 ip: Ipv4Addr::new(10, 0, 0, 100 + i),
                 mac,
-                lease_time: 123456,
+                lease_time: 123_456,
             };
             let _ = server.leases.insert(mac, lease);
         }
@@ -1068,7 +1049,7 @@ mod tests {
 
     #[test]
     fn dhcp_config_default_values() {
-        let config = super::DhcpConfig::default();
+        let config = TestConfig::default();
         assert_eq!(config.server_ip, Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(config.subnet_mask, Ipv4Addr::new(255, 255, 255, 0));
         assert_eq!(config.router, Some(Ipv4Addr::new(192, 168, 1, 1)));
@@ -1076,9 +1057,7 @@ mod tests {
         assert_eq!(config.dns_servers[0], Ipv4Addr::new(8, 8, 8, 8));
         assert_eq!(config.ip_pool_start, Ipv4Addr::new(192, 168, 1, 100));
         assert_eq!(config.ip_pool_end, Ipv4Addr::new(192, 168, 1, 200));
-        assert_eq!(config.lease_time, super::LEASE_TIME);
+        assert_eq!(config.lease_time, super::DEFAULT_LEASE_TIME);
         assert_eq!(config.socket_buffer_size, super::DEFAULT_SOCKET_BUFFER_SIZE);
     }
-
-    // Removed dhcp_server_get_next_available_ip: covered by doc test
 }
