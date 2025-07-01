@@ -28,3 +28,7 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+
+[patch.crates-io]
+embassy-net = { git = "https://github.com/rttfd/embassy.git", branch = "renik" }
+embassy-time = { git = "https://github.com/rttfd/embassy.git", branch = "renik" }
