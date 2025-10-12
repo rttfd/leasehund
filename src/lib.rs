@@ -107,6 +107,52 @@
 //! - IPv4 address (4 bytes)
 //! - MAC address (6 bytes)  
 //! - Lease expiration timestamp (8 bytes)
+//!
+//! ## Advanced Usage
+//!
+//! For the case you want to handle each transaction manually, you can use the `lease_one` method.
+//! This allows you to handle each DHCP transaction individually, giving you more control over the process.
+//! For instance, you might want to log each transaction or implement custom logic based on the transaction type.
+//! Here's an example of how to use `lease_one`:
+//! ```rust,no_run
+//! use core::net::Ipv4Addr;
+//! use leasehund::{DhcpServer, DHCPServerSocket, TransactionEvent};
+//! use embassy_net::Stack;
+//! use embassy_net::udp::UdpSocket;
+//! use embassy_time::Duration;
+//!
+//! # async fn example(stack: Stack<'static>) {
+//!     let config: DhcpConfig<4> = DhcpConfigBuilder::new()
+//!         .server_ip(Ipv4Addr::new(10, 0, 1, 1))
+//!         .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
+//!         .router(Ipv4Addr::new(10, 0, 1, 1))
+//!         .add_dns_server(Ipv4Addr::new(1, 1, 1, 1))      // Cloudflare DNS
+//!         .add_dns_server(Ipv4Addr::new(1, 0, 0, 1))      // Cloudflare backup
+//!         .add_dns_server(Ipv4Addr::new(8, 8, 8, 8))      // Google DNS
+//!         .ip_pool(
+//!             Ipv4Addr::new(10, 0, 100, 1),
+//!             Ipv4Addr::new(10, 0, 199, 254)
+//!         )
+//!         .lease_time(7200)    // 2 hours
+//!         .build();
+//!     let mut dhcp_server: DhcpServer<32, 4> = DhcpServer::with_config(config);
+//!     let mut buffers = DHCPServerBuffers::new();
+//!     let mut socket = DHCPServerSocket::new(stack, &mut buffers);
+//!     loop {
+//!         let Ok(event) = server.lease_one(&socket).await else {
+//!             // Handle error (e.g., log it)
+//!             continue;
+//!         };
+//!         match event {
+//!             TransactionEvent::Leased(ip, mac) => {
+//!                 info!("Leased IP: {} to MAC: {:02x?}", ip, mac);
+//!             }
+//!             TransactionEvent::Released(ip, mac) => {
+//!                 info!("Released IP: {} from MAC: {:02x?}", ip, mac);
+//!             }
+//!         }
+//!     }
+//! # }
 
 #![no_std]
 #![warn(missing_docs)]
@@ -116,10 +162,13 @@
 
 use core::net::Ipv4Addr;
 use embassy_net::Stack;
-use embassy_net::udp::{BindError, PacketMetadata, UdpSocket};
+use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Timer};
 use heapless::Vec;
 use smoltcp::phy::PacketMeta;
+
+/// Reexported types from Embassy for convenience
+pub use embassy_net::udp::RecvError;
 
 /// Standard DHCP server port (RFC 2131)
 const DHCP_SERVER_PORT: u16 = 67;
@@ -405,6 +454,7 @@ impl Default for DhcpPacket {
 /// Used internally by the DHCP server to track active leases.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct LeaseEntry {
     /// The IP address assigned to the client
     ip: Ipv4Addr,
@@ -433,6 +483,7 @@ impl DHCPServerBuffers {
     /// let mut buffers = DHCPServerBuffers::new();
     /// ```
     ///
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             rx_buffer: [0; DEFAULT_SOCKET_BUFFER_SIZE],
@@ -443,8 +494,35 @@ impl DHCPServerBuffers {
     }
 }
 
-/// Wrapper around the Embassy UDP socket for DHCP server use
-/// with associated buffers
+impl Default for DHCPServerBuffers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Represents a DHCP lease/release event
+/// Used for logging and monitoring lease assignments and releases
+///
+/// - **Leased** - indicates a new lease assignment
+///
+/// - **Released** - indicates a release the IP by a client
+///   Each event includes the relevant IP address and client MAC address
+/// # Examples
+/// ```rust
+/// use leasehund::TransactionEvent;
+/// use core::net::Ipv4Addr;
+/// let event = TransactionEvent::Leased(Ipv4Addr::new(192, 168, 1, 100), [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);    
+/// ```
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum TransactionEvent {
+    /// Indicates a new lease assignment
+    Leased(Ipv4Addr, [u8; 6]),
+    /// Indicates a release the IP by a client
+    Released(Ipv4Addr, [u8; 6]),
+}
+
+/// Wrapper around the Embassy UDP socket for DHCP server use.
 pub struct DHCPServerSocket<'a> {
     socket: UdpSocket<'a>,
 }
@@ -452,7 +530,6 @@ pub struct DHCPServerSocket<'a> {
 impl<'a> DHCPServerSocket<'a> {
     /// Creates a new DHCP server UDP socket bound to the standard DHCP server port (67)
     /// using the provided Embassy network stack and pre-allocated buffers.
-    /// The socket is configured to send responses to the DHCP client port (68).
     /// # Arguments
     /// * `stack` - The Embassy network stack to use for the socket
     /// * `buffers` - Pre-allocated buffers for the UDP socket
@@ -468,22 +545,17 @@ impl<'a> DHCPServerSocket<'a> {
     /// let socket = DHCPServerSocket::new(stack, &mut buffers);
     /// ```
     ///
+    #[must_use]
     pub fn new(stack: Stack<'a>, buffers: &'a mut DHCPServerBuffers) -> Self {
-        let socket = UdpSocket::new(
+        let mut socket = UdpSocket::new(
             stack,
             &mut buffers.rx_meta,
             &mut buffers.rx_buffer,
             &mut buffers.tx_meta,
             &mut buffers.tx_buffer,
         );
+        socket.bind(DHCP_SERVER_PORT).unwrap();
         Self { socket }
-    }
-
-    /// Binds the UDP socket to the DHCP server port (67)
-    /// # Returns
-    /// `Ok(())` if binding was successful, or a `BindError` if it failed
-    fn bind(&mut self) -> Result<(), BindError> {
-        self.socket.bind(DHCP_SERVER_PORT)
     }
 }
 
@@ -746,6 +818,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     ///
     /// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
     /// ```
+
     /// Finds the next available IP address in the configured pool
     ///
     /// Iterates through the IP address range from `ip_pool_start` to `ip_pool_end`
@@ -943,13 +1016,17 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// * `socket` - UDP socket for sending responses
     /// * `data` - Raw packet data received from client
     #[allow(clippy::future_not_send)]
-    async fn handle_packet(&mut self, socket: &DHCPServerSocket<'_>, data: &[u8]) {
+    async fn handle_packet(
+        &mut self,
+        socket: &DHCPServerSocket<'_>,
+        data: &[u8],
+    ) -> Option<TransactionEvent> {
         if data.len() < core::mem::size_of::<DhcpPacket>() {
-            return;
+            return None;
         }
         let packet = unsafe { &*data.as_ptr().cast::<DhcpPacket>() };
         if packet.magic != DHCP_MAGIC {
-            return;
+            return None;
         }
         let options = &data[core::mem::size_of::<DhcpPacket>()..];
         if let Some(msg_type) = Self::parse_message_type(options) {
@@ -962,6 +1039,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
                         meta: PacketMeta::default(),
                     };
                     let _ = socket.socket.send_to(&resp, meta).await;
+                    return None;
                 }
                 DHCP_REQUEST => {
                     let resp = self.make_response(packet, DHCP_ACK);
@@ -971,12 +1049,80 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
                         meta: PacketMeta::default(),
                     };
                     let _ = socket.socket.send_to(&resp, meta).await;
+                    let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
+                    return self
+                        .leases
+                        .get(&mac)
+                        .map(|entry| TransactionEvent::Leased(entry.ip, mac));
                 }
                 DHCP_RELEASE => {
                     let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
-                    self.leases.remove(&mac);
+                    let entry = self.leases.remove(&mac);
+                    return entry.map(|entry| TransactionEvent::Released(entry.ip, entry.mac));
                 }
-                _ => {}
+                _ => {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// Runs the DHCP server until a single lease/release transaction occurs
+    /// This function listens for incoming DHCP packets and processes them.
+    /// It is typically called in a loop to handle multiple lease/release transactions.
+    /// # Arguments
+    /// * `socket` - The DHCPServerSocket which is actually a properly configured UDP socket to listen on for DHCP packets
+    /// # Returns
+    /// - Ok([`TransactionEvent`]) if a transaction was successfully processed [`pin!`]
+    /// - Err([`RecvError`]) if there was an error of receiving a packet
+    /// # Examples
+    /// ```rust,no_run
+    /// use leasehund::{DhcpServer, DHCPServerBuffers, DHCPServerSocket, TransactionEvent};
+    /// use embassy_net::Stack;
+    /// # async fn example(stack: Stack<'static>) {
+    /// let mut server = DhcpServer::<32, 4>::new(
+    ///     Ipv4Addr::new(192, 168, 1, 1),
+    ///     Ipv4Addr::new(255, 255, 255, 0),
+    ///     Ipv4Addr::new(192, 168,1, 1),
+    ///     Ipv4Addr::new(8, 8, 8, 8),
+    ///     Ipv4Addr::new(192, 168, 1, 100),
+    ///     Ipv4Addr::new(192, 168, 1, 200),
+    /// );
+    /// let mut buffers = DHCPServerBuffers::new();
+    /// let mut socket = DHCPServerSocket::new(stack, &mut buffers);
+    /// loop {
+    ///     let Ok(event) = server.lease_one(&socket).await else {
+    ///         // Handle error (e.g., log it)
+    ///         continue;
+    ///     };
+    ///     match event {
+    ///         TransactionEvent::Leased(ip, mac) => {
+    ///             info!("Leased IP: {} to MAC: {:02x?}", ip, mac);
+    ///         }
+    ///         TransactionEvent::Released(ip, mac) => {
+    ///             info!("Released IP: {} from MAC: {:02x?}", ip, mac);
+    ///         }
+    ///     }
+    /// # }
+    /// ```
+    #[allow(clippy::future_not_send)]
+    pub async fn lease_one(
+        &mut self,
+        socket: &mut DHCPServerSocket<'_>,
+    ) -> Result<TransactionEvent, RecvError> {
+        loop {
+            let mut buf = [0u8; 576];
+            match socket.socket.recv_from(&mut buf).await {
+                Ok((len, _)) => {
+                    if let Some(event) = self.handle_packet(socket, &buf[..len]).await {
+                        // Ensure all data is flushed to the network
+                        socket.socket.flush().await;
+                        return Ok(event);
+                    }
+                }
+
+                Err(e) => return Err(e),
             }
         }
     }
@@ -1029,13 +1175,13 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     #[allow(clippy::future_not_send)]
     pub async fn run(&mut self, stack: Stack<'_>) -> ! {
         let mut buffers = DHCPServerBuffers::new();
-        let mut socket = DHCPServerSocket::new(stack, &mut buffers);
-        socket.bind().unwrap();
-
+        let socket = DHCPServerSocket::new(stack, &mut buffers);
         loop {
             let mut buf = [0u8; 576];
             match socket.socket.recv_from(&mut buf).await {
-                Ok((len, _)) => self.handle_packet(&socket, &buf[..len]).await,
+                Ok((len, _)) => {
+                    let _ = self.handle_packet(&socket, &buf[..len]).await;
+                }
                 Err(_) => Timer::after(Duration::from_millis(100)).await,
             }
         }
