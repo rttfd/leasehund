@@ -116,7 +116,7 @@
 
 use core::net::Ipv4Addr;
 use embassy_net::Stack;
-use embassy_net::udp::{PacketMetadata, UdpSocket};
+use embassy_net::udp::{BindError, PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Timer};
 use heapless::Vec;
 use smoltcp::phy::PacketMeta;
@@ -412,6 +412,79 @@ struct LeaseEntry {
     mac: [u8; 6],
     /// Timestamp when the lease expires (milliseconds since boot)
     lease_time: u64, // Timestamp when lease expires
+}
+
+/// Internal structure to hold UDP socket buffers and metadata
+/// for the DHCP server
+pub struct DHCPServerBuffers {
+    rx_buffer: [u8; DEFAULT_SOCKET_BUFFER_SIZE],
+    tx_buffer: [u8; DEFAULT_SOCKET_BUFFER_SIZE],
+    rx_meta: [PacketMetadata; 16],
+    tx_meta: [PacketMetadata; 16],
+}
+
+impl DHCPServerBuffers {
+    /// Creates a new set of DHCP server buffers with default sizes
+    /// # Returns
+    /// A new `DHCPServerBuffers` instance with pre-allocated buffers
+    /// # Examples
+    /// ```rust
+    /// use leasehund::DHCPServerBuffers;
+    /// let mut buffers = DHCPServerBuffers::new();
+    /// ```
+    ///
+    pub const fn new() -> Self {
+        Self {
+            rx_buffer: [0; DEFAULT_SOCKET_BUFFER_SIZE],
+            tx_buffer: [0; DEFAULT_SOCKET_BUFFER_SIZE],
+            rx_meta: [PacketMetadata::EMPTY; 16],
+            tx_meta: [PacketMetadata::EMPTY; 16],
+        }
+    }
+}
+
+/// Wrapper around the Embassy UDP socket for DHCP server use
+/// with associated buffers
+pub struct DHCPServerSocket<'a> {
+    socket: UdpSocket<'a>,
+}
+
+impl<'a> DHCPServerSocket<'a> {
+    /// Creates a new DHCP server UDP socket bound to the standard DHCP server port (67)
+    /// using the provided Embassy network stack and pre-allocated buffers.
+    /// The socket is configured to send responses to the DHCP client port (68).
+    /// # Arguments
+    /// * `stack` - The Embassy network stack to use for the socket
+    /// * `buffers` - Pre-allocated buffers for the UDP socket
+    /// # Returns
+    /// A new `DHCPServerSocket` instance
+    ///
+    /// # Examples
+    /// ```rust
+    /// use leasehund::{DHCPServerSocket, DHCPServerBuffers};
+    /// use embassy_net::Stack;
+    /// let stack: Stack = /* obtain Embassy network stack */;
+    /// let mut buffers = DHCPServerBuffers::new();
+    /// let socket = DHCPServerSocket::new(stack, &mut buffers);
+    /// ```
+    ///
+    pub fn new(stack: Stack<'a>, buffers: &'a mut DHCPServerBuffers) -> Self {
+        let socket = UdpSocket::new(
+            stack,
+            &mut buffers.rx_meta,
+            &mut buffers.rx_buffer,
+            &mut buffers.tx_meta,
+            &mut buffers.tx_buffer,
+        );
+        Self { socket }
+    }
+
+    /// Binds the UDP socket to the DHCP server port (67)
+    /// # Returns
+    /// `Ok(())` if binding was successful, or a `BindError` if it failed
+    fn bind(&mut self) -> Result<(), BindError> {
+        self.socket.bind(DHCP_SERVER_PORT)
+    }
 }
 
 /// A lightweight DHCP server implementation for embedded systems
@@ -870,7 +943,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// * `socket` - UDP socket for sending responses
     /// * `data` - Raw packet data received from client
     #[allow(clippy::future_not_send)]
-    async fn handle_packet(&mut self, socket: &UdpSocket<'_>, data: &[u8]) {
+    async fn handle_packet(&mut self, socket: &DHCPServerSocket<'_>, data: &[u8]) {
         if data.len() < core::mem::size_of::<DhcpPacket>() {
             return;
         }
@@ -888,7 +961,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
                         local_address: None,
                         meta: PacketMeta::default(),
                     };
-                    let _ = socket.send_to(&resp, meta).await;
+                    let _ = socket.socket.send_to(&resp, meta).await;
                 }
                 DHCP_REQUEST => {
                     let resp = self.make_response(packet, DHCP_ACK);
@@ -897,7 +970,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
                         local_address: None,
                         meta: PacketMeta::default(),
                     };
-                    let _ = socket.send_to(&resp, meta).await;
+                    let _ = socket.socket.send_to(&resp, meta).await;
                 }
                 DHCP_RELEASE => {
                     let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
@@ -955,21 +1028,13 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// ```
     #[allow(clippy::future_not_send)]
     pub async fn run(&mut self, stack: Stack<'_>) -> ! {
-        let mut rx_buffer = [0; DEFAULT_SOCKET_BUFFER_SIZE];
-        let mut tx_buffer = [0; DEFAULT_SOCKET_BUFFER_SIZE];
-        let mut rx_meta = [PacketMetadata::EMPTY; 16];
-        let mut tx_meta = [PacketMetadata::EMPTY; 16];
-        let mut socket = UdpSocket::new(
-            stack,
-            &mut rx_meta,
-            &mut rx_buffer,
-            &mut tx_meta,
-            &mut tx_buffer,
-        );
-        socket.bind(DHCP_SERVER_PORT).unwrap();
+        let mut buffers = DHCPServerBuffers::new();
+        let mut socket = DHCPServerSocket::new(stack, &mut buffers);
+        socket.bind().unwrap();
+
         loop {
             let mut buf = [0u8; 576];
-            match socket.recv_from(&mut buf).await {
+            match socket.socket.recv_from(&mut buf).await {
                 Ok((len, _)) => self.handle_packet(&socket, &buf[..len]).await,
                 Err(_) => Timer::after(Duration::from_millis(100)).await,
             }
