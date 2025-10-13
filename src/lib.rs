@@ -447,6 +447,10 @@ impl Default for DhcpPacket {
         }
     }
 }
+const FIXED_PART_SIZE: usize = core::mem::size_of::<DhcpPacket>();
+const END_OPTIONS_MARK_SIZE: usize = 1; // Size of the END option
+const OPTIONS_SIZE: usize = 335; // The maximum DHCP options field size used by this implementation
+const DHCP_PACKET_SIZE: usize = FIXED_PART_SIZE + OPTIONS_SIZE + END_OPTIONS_MARK_SIZE;
 
 /// Represents a DHCP lease entry for a client
 ///
@@ -873,7 +877,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     ///
     /// * `packet` - Mutable reference to the packet buffer
     /// * `msg_type` - DHCP message type to include in options
-    fn add_options(&self, packet: &mut Vec<u8, 576>, msg_type: u8) {
+    fn add_options(&self, packet: &mut Vec<u8, DHCP_PACKET_SIZE>, msg_type: u8) {
         packet
             .extend_from_slice(&[OPTION_MESSAGE_TYPE, 1, msg_type])
             .ok();
@@ -924,7 +928,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// # Returns
     ///
     /// A `Vec` containing the serialized DHCP response packet
-    fn make_response(&mut self, req: &DhcpPacket, msg_type: u8) -> Vec<u8, 576> {
+    fn make_response(&mut self, req: &DhcpPacket, msg_type: u8) -> Vec<u8, DHCP_PACKET_SIZE> {
         let mut resp = DhcpPacket {
             op: 2, // BOOTREPLY
             xid: req.xid,
@@ -957,7 +961,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
             }
             _ => {}
         }
-        let mut bytes = Vec::<u8, 576>::new();
+        let mut bytes = Vec::<u8, DHCP_PACKET_SIZE>::new();
         unsafe {
             let resp_bytes = core::slice::from_raw_parts(
                 (&raw const resp).cast::<u8>(),
@@ -1077,7 +1081,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         socket: &mut DHCPServerSocket<'_>,
     ) -> Result<TransactionEvent, RecvError> {
         loop {
-            let mut buf = [0u8; 576];
+            let mut buf = [0u8; DHCP_PACKET_SIZE];
             match socket.socket.recv_from(&mut buf).await {
                 Ok((len, _)) => {
                     if let Some(event) = self.handle_packet(socket, &buf[..len]).await {
@@ -1142,7 +1146,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         let mut buffers = DHCPServerBuffers::new();
         let socket = DHCPServerSocket::new(stack, &mut buffers);
         loop {
-            let mut buf = [0u8; 576];
+            let mut buf = [0u8; DHCP_PACKET_SIZE];
             match socket.socket.recv_from(&mut buf).await {
                 Ok((len, _)) => {
                     let _ = self.handle_packet(&socket, &buf[..len]).await;
