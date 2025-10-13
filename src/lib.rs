@@ -784,41 +784,6 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         self.leases.len() >= (pool_size as usize).min(MAX_CLIENTS)
     }
 
-    /// Creates a new DHCP server with the specified configuration
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - A `DhcpConfig` structure containing the desired configuration
-    ///
-    /// # Returns
-    ///
-    /// A new `DhcpServer` instance ready to handle DHCP requests
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use core::net::Ipv4Addr;
-    /// use leasehund::{DhcpConfig, DhcpServer};
-    /// use heapless::Vec;
-    ///
-    /// let mut dns_servers = heapless::Vec::<core::net::Ipv4Addr, 4>::new();
-    /// dns_servers.push(core::net::Ipv4Addr::new(8, 8, 8, 8)).ok();
-    /// dns_servers.push(core::net::Ipv4Addr::new(8, 8, 4, 4)).ok();
-    ///
-    /// let config: DhcpConfig<4> = DhcpConfig {
-    ///     server_ip: Ipv4Addr::new(192, 168, 1, 1),
-    ///     subnet_mask: Ipv4Addr::new(255, 255, 255, 0),
-    ///     router: Some(Ipv4Addr::new(192, 168, 1, 1)),
-    ///     dns_servers,
-    ///     ip_pool_start: Ipv4Addr::new(192, 168, 1, 100),
-    ///     ip_pool_end: Ipv4Addr::new(192, 168, 1, 200),
-    ///     lease_time: 3600, // 1 hour
-    ///     socket_buffer_size: 1024,
-    /// };
-    ///
-    /// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
-    /// ```
-
     /// Finds the next available IP address in the configured pool
     ///
     /// Iterates through the IP address range from `ip_pool_start` to `ip_pool_end`
