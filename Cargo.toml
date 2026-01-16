@@ -12,7 +12,7 @@ keywords = ["dhcp", "embedded", "no-std", "networking", "embassy"]
 readme = "README.md"
 
 [dependencies]
-embassy-net = { version = "0.7.0", features = [
+embassy-net = { version = "0.8.0", features = [
     "tcp",
     "udp",
     "dhcpv4",
