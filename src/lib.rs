@@ -792,8 +792,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// Checks if the IP pool is full
     #[must_use]
     pub fn is_pool_full(&self) -> bool {
-        let pool_size =
-            u32::from(self.config.ip_pool_end) - u32::from(self.config.ip_pool_start) + 1;
+        let pool_size = u32::from(self.config.ip_pool_end) - u32::from(self.config.ip_pool_start) + 1;
         self.leases.len() >= (pool_size as usize).min(MAX_CLIENTS)
     }
 
@@ -886,17 +885,11 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// * `packet` - Mutable reference to the packet buffer
     /// * `msg_type` - DHCP message type to include in options
     fn add_options(&self, packet: &mut Vec<u8, DHCP_PACKET_SIZE>, msg_type: u8) {
-        packet
-            .extend_from_slice(&[OPTION_MESSAGE_TYPE, 1, msg_type])
-            .ok();
+        packet.extend_from_slice(&[OPTION_MESSAGE_TYPE, 1, msg_type]).ok();
         packet.extend_from_slice(&[OPTION_SERVER_ID, 4]).ok();
-        packet
-            .extend_from_slice(&self.config.server_ip.octets())
-            .ok();
+        packet.extend_from_slice(&self.config.server_ip.octets()).ok();
         packet.extend_from_slice(&[OPTION_SUBNET_MASK, 4]).ok();
-        packet
-            .extend_from_slice(&self.config.subnet_mask.octets())
-            .ok();
+        packet.extend_from_slice(&self.config.subnet_mask.octets()).ok();
 
         // Add router option if configured
         if let Some(router) = self.config.router {
@@ -908,18 +901,14 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         if !self.config.dns_servers.is_empty() {
             let dns_count = self.config.dns_servers.len() * 4; // 4 bytes per IP
             let dns_count_u8 = u8::try_from(dns_count).unwrap_or_default();
-            packet
-                .extend_from_slice(&[OPTION_DNS_SERVER, dns_count_u8])
-                .ok();
+            packet.extend_from_slice(&[OPTION_DNS_SERVER, dns_count_u8]).ok();
             for dns in &self.config.dns_servers {
                 packet.extend_from_slice(&dns.octets()).ok();
             }
         }
 
         packet.extend_from_slice(&[OPTION_LEASE_TIME, 4]).ok();
-        packet
-            .extend_from_slice(&self.config.lease_time.to_be_bytes())
-            .ok();
+        packet.extend_from_slice(&self.config.lease_time.to_be_bytes()).ok();
         packet.extend_from_slice(&[OPTION_END]).ok();
     }
 
@@ -971,10 +960,8 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         }
         let mut bytes = Vec::<u8, DHCP_PACKET_SIZE>::new();
         unsafe {
-            let resp_bytes = core::slice::from_raw_parts(
-                (&raw const resp).cast::<u8>(),
-                core::mem::size_of::<DhcpPacket>(),
-            );
+            let resp_bytes =
+                core::slice::from_raw_parts((&raw const resp).cast::<u8>(), core::mem::size_of::<DhcpPacket>());
             bytes.extend_from_slice(resp_bytes).ok();
         }
         self.add_options(&mut bytes, msg_type);
@@ -993,11 +980,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// * `socket` - UDP socket for sending responses
     /// * `data` - Raw packet data received from client
     #[allow(clippy::future_not_send)]
-    async fn handle_packet(
-        &mut self,
-        socket: &DHCPServerSocket<'_>,
-        data: &[u8],
-    ) -> Option<TransactionEvent> {
+    async fn handle_packet(&mut self, socket: &DHCPServerSocket<'_>, data: &[u8]) -> Option<TransactionEvent> {
         if data.len() < core::mem::size_of::<DhcpPacket>() {
             return None;
         }
@@ -1089,10 +1072,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// ```
     ///
     #[allow(clippy::future_not_send)]
-    pub async fn lease_one(
-        &mut self,
-        socket: &mut DHCPServerSocket<'_>,
-    ) -> Result<TransactionEvent, RecvError> {
+    pub async fn lease_one(&mut self, socket: &mut DHCPServerSocket<'_>) -> Result<TransactionEvent, RecvError> {
         loop {
             let mut buf = [0u8; DHCP_PACKET_SIZE];
             match socket.socket.recv_from(&mut buf).await {
