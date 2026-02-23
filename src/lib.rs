@@ -613,10 +613,7 @@ impl<'a> DHCPServerSocket<'a> {
 ///
 /// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 /// ```
-pub struct DhcpServer<
-    const MAX_CLIENTS: usize = DEFAULT_MAX_CLIENTS,
-    const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS,
-> {
+pub struct DhcpServer<const MAX_CLIENTS: usize = DEFAULT_MAX_CLIENTS, const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS> {
     /// Server configuration
     config: DhcpConfig<MAX_DNS>,
     /// Hash map storing active leases, keyed by client MAC address
