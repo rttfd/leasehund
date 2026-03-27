@@ -28,7 +28,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-leasehund = "0.2.0"
+leasehund = "0.3.0"
 ```
 
 ## Usage
