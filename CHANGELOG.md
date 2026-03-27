@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Updated GitHub Actions to Node.js 24 compatible versions
+  - `actions/checkout@v4` -> `v5`
+  - `actions/cache@v4` -> `v5`
+  - `actions/create-release@v1` -> `softprops/action-gh-release@v2`
+
 ## [0.3.0] - 2026-03-27
 
 ### Added

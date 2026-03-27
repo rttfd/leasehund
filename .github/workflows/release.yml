@@ -16,7 +16,7 @@ jobs:
       version: ${{ steps.get-version.outputs.version }}
       tag-version: ${{ steps.get-tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Get version from Cargo.toml
         id: get-version
         run: |
@@ -43,11 +43,11 @@ jobs:
     needs: check-version
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Rust
         run: make install-rust
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -65,7 +65,7 @@ jobs:
       already-published: ${{ steps.check-published.outputs.already-published }}
       crate-name: ${{ steps.get-crate-name.outputs.crate-name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Get crate name
         id: get-crate-name
         run: |
@@ -99,11 +99,11 @@ jobs:
     if: needs.check-crates-published.outputs.already-published == 'false'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Rust
         run: make install-rust
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -135,7 +135,7 @@ jobs:
     outputs:
       release-exists: ${{ steps.check-release.outputs.release-exists }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check if GitHub release exists
         id: check-release
         env:
@@ -165,7 +165,7 @@ jobs:
     needs: [ check-version, check-release, publish, skip-publish ]
     if: always() && needs.check-release.outputs.release-exists == 'false' && (needs.publish.result == 'success' || needs.skip-publish.result == 'success')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Generate changelog
@@ -187,12 +187,12 @@ jobs:
           echo "Generated changelog with $(echo "$CHANGELOG" | wc -l) entries"
 
       - name: Create Release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ needs.check-version.outputs.version }}
+          name: Release ${{ needs.check-version.outputs.version }}
           body_path: changelog.txt
           draft: false
           prerelease: ${{ contains(needs.check-version.outputs.version, '-') }}
