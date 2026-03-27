@@ -4,7 +4,7 @@
 
 ![Dall-E generated leasehund image](https://raw.githubusercontent.com/rttfd/static/refs/heads/main/leasehund/leasehund.jpeg)
 
-# Leasehund 🐶
+# Leasehund
 
 A lightweight, embedded-friendly DHCP server implementation for Rust `no_std` environments.
 
@@ -14,13 +14,13 @@ Leasehund provides a minimal DHCP server implementation designed for embedded sy
 
 ## Features
 
-- **🚀 No-std compatible**: Designed for embedded systems without heap allocation
-- **⚡ Embassy integration**: Built on top of Embassy async runtime and networking stack
-- **🔧 Configurable IP pools**: Define custom IP address ranges for client assignment
-- **📋 Lease management**: Automatic lease tracking with configurable timeouts
-- **�️ Essential DHCP options**: Supports subnet mask, router, DNS server configuration
-- **💾 Memory efficient**: Uses heapless data structures with compile-time size limits
-- **🔒 Safe**: Written in safe Rust with comprehensive error handling
+- **No-std compatible**: Designed for embedded systems without heap allocation
+- **Embassy integration**: Built on top of Embassy async runtime and networking stack
+- **Configurable IP pools**: Define custom IP address ranges for client assignment
+- **Lease management**: Automatic lease tracking with configurable timeouts
+- **Essential DHCP options**: Supports subnet mask, router, DNS server configuration
+- **Memory efficient**: Uses heapless data structures with compile-time size limits
+- **Safe**: Written in safe Rust with comprehensive error handling
 
 ## Quick Start
 
@@ -263,4 +263,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Leasehund** - Because every good network needs a reliable dog to fetch IP addresses! 🐕‍🦺
+**Leasehund** - Because every good network needs a reliable dog to fetch IP addresses!
