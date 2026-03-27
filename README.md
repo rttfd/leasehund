@@ -4,7 +4,7 @@
 
 ![Dall-E generated leasehund image](https://raw.githubusercontent.com/rttfd/static/refs/heads/main/leasehund/leasehund.jpeg)
 
-# Leasehund 🐶
+# Leasehund
 
 A lightweight, embedded-friendly DHCP server implementation for Rust `no_std` environments.
 
@@ -14,13 +14,13 @@ Leasehund provides a minimal DHCP server implementation designed for embedded sy
 
 ## Features
 
-- **🚀 No-std compatible**: Designed for embedded systems without heap allocation
-- **⚡ Embassy integration**: Built on top of Embassy async runtime and networking stack
-- **🔧 Configurable IP pools**: Define custom IP address ranges for client assignment
-- **📋 Lease management**: Automatic lease tracking with configurable timeouts
-- **�️ Essential DHCP options**: Supports subnet mask, router, DNS server configuration
-- **💾 Memory efficient**: Uses heapless data structures with compile-time size limits
-- **🔒 Safe**: Written in safe Rust with comprehensive error handling
+- **No-std compatible**: Designed for embedded systems without heap allocation
+- **Embassy integration**: Built on top of Embassy async runtime and networking stack
+- **Configurable IP pools**: Define custom IP address ranges for client assignment
+- **Lease management**: Automatic lease tracking with configurable timeouts
+- **Essential DHCP options**: Supports subnet mask, router, DNS server configuration
+- **Memory efficient**: Uses heapless data structures with compile-time size limits
+- **Safe**: Written in safe Rust with comprehensive error handling
 
 ## Quick Start
 
@@ -67,14 +67,14 @@ async fn main(_spawner: Spawner) {
 
 The DHCP server requires the following configuration parameters:
 
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `server_ip` | IP address of the DHCP server | `192.168.1.1` |
-| `subnet_mask` | Network subnet mask | `255.255.255.0` |
-| `router` | Default gateway IP address | `192.168.1.1` |
-| `dns_server` | DNS server IP address | `8.8.8.8` |
+| Parameter       | Description                      | Example         |
+| --------------- | -------------------------------- | --------------- |
+| `server_ip`     | IP address of the DHCP server    | `192.168.1.1`   |
+| `subnet_mask`   | Network subnet mask              | `255.255.255.0` |
+| `router`        | Default gateway IP address       | `192.168.1.1`   |
+| `dns_server`    | DNS server IP address            | `8.8.8.8`       |
 | `ip_pool_start` | First IP in the assignable range | `192.168.1.100` |
-| `ip_pool_end` | Last IP in the assignable range | `192.168.1.200` |
+| `ip_pool_end`   | Last IP in the assignable range  | `192.168.1.200` |
 
 ### Advanced Configuration
 
@@ -105,11 +105,11 @@ let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 
 ## Supported DHCP Messages
 
-| Message Type | Description | Server Response |
-|--------------|-------------|-----------------|
-| **DISCOVER** | Client broadcast to find DHCP servers | **OFFER** with available IP |
-| **REQUEST** | Client request for specific IP address | **ACK** confirming lease |
-| **RELEASE** | Client releasing IP address | Lease removal (no response) |
+| Message Type | Description                            | Server Response             |
+| ------------ | -------------------------------------- | --------------------------- |
+| **DISCOVER** | Client broadcast to find DHCP servers  | **OFFER** with available IP |
+| **REQUEST**  | Client request for specific IP address | **ACK** confirming lease    |
+| **RELEASE**  | Client releasing IP address            | Lease removal (no response) |
 
 ## DHCP Options Supported
 
@@ -122,6 +122,56 @@ The server automatically includes these standard DHCP options in responses:
 - **Option 53**: DHCP Message Type
 - **Option 54**: Server Identifier
 
+
+## Advanced uscase
+
+In case you need to handle lease/release events of each new client you can use the `lease_one` method:
+
+```rust
+use core::net::Ipv4Addr;
+use leasehund::{DhcpServer, DHCPServerSocket, TransactionEvent};
+use embassy_net::Stack;
+use core::net::Ipv4Addr;
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    // Initialize your embassy network stack here
+    let stack = /* ... your network stack initialization ... */;
+    
+    let config: DhcpConfig<4> = DhcpConfigBuilder::new()
+        .server_ip(Ipv4Addr::new(10, 0, 1, 1))
+        .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
+        .router(Ipv4Addr::new(10, 0, 1, 1))
+        .add_dns_server(Ipv4Addr::new(1, 1, 1, 1))      // Cloudflare DNS
+        .add_dns_server(Ipv4Addr::new(1, 0, 0, 1))      // Cloudflare backup
+        .add_dns_server(Ipv4Addr::new(8, 8, 8, 8))      // Google DNS
+        .ip_pool(
+            Ipv4Addr::new(10, 0, 100, 1),
+            Ipv4Addr::new(10, 0, 199, 254)
+        )
+        .lease_time(7200)    // 2 hours
+        .build();
+    
+    let mut dhcp_server: DhcpServer<32, 4> = DhcpServer::with_config(config);
+    let mut buffers = DHCPServerBuffers::new();
+    let mut socket = DHCPServerSocket::new(stack, &mut buffers);
+    loop {
+        let Ok(event) = server.lease_one(&socket).await else {
+            // Handle error (e.g., log it)
+            continue;
+        };
+
+        match event {
+            TransactionEvent::Leased(ip, mac) => {
+                info!("Leased IP: {} to MAC: {:02x?}", ip, mac);
+            }
+            TransactionEvent::Released(ip, mac) => {
+                info!("Released IP: {} from MAC: {:02x?}", ip, mac);
+            }
+        }
+    }
+}
+```
 
 ## Protocol Compliance
 
@@ -213,4 +263,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Leasehund** - Because every good network needs a reliable dog to fetch IP addresses! 🐕‍🦺
+**Leasehund** - Because every good network needs a reliable dog to fetch IP addresses!
