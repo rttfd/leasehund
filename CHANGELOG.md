@@ -10,18 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Makefile with development commands (`make ci`, `make test`, `make publish`, etc.)
 - CHANGELOG.md
-- `DHCPServerBuffers` struct for pre-allocated UDP buffers
-- `DHCPServerSocket` wrapper type for DHCP socket management
-- `run_once` method for single DHCP transaction processing
-- `lease_one` method for manual transaction handling
-- Improved documentation with more examples
-- Refactored to remove magic constants
-- Updated to latest compatible crate versions
+- `DHCPServerBuffers` struct for pre-allocated UDP buffers (@kdimonych)
+- `DHCPServerSocket` wrapper type for DHCP socket management (@kdimonych)
+- `run_once` method for single DHCP transaction processing (@kdimonych)
+- `lease_one` method for manual transaction handling (@kdimonych)
 
 ### Changed
+- Updated `embassy-net` from 0.7.0 to 0.8.0 (@arctan2, @liebman)
+- Updated `embassy-time` (@liebman)
 - GitHub workflows now use Makefile commands for consistency
-- Removed decorative emojis from codebase, keeping only status indicators (checkmarks/failures)
-- Fixed doctest examples to compile correctly without `no_run`
+- Removed decorative emojis from codebase, keeping only status indicators
+- Fixed doctest examples to compile correctly
+- Improved documentation with more examples (@kdimonych)
+- Refactored to remove magic constants (@kdimonych)
 
 ## [0.2.0]
 
