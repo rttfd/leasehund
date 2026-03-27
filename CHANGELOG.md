@@ -5,13 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-03-27
 
 ### Changed
+- Bumped MSRV to Rust 1.91
+- Updated dependencies to latest versions
+  - `embassy-net` 0.8.0 -> 0.9.0
+  - `embassy-time` 0.5.0 -> 0.5.1
+  - `heapless` 0.8.0 -> 0.9.2
+  - `smoltcp` 0.12.0 -> 0.13.0
+- Updated `heapless::FnvIndexMap` to `IndexMap` with explicit hasher (heapless 0.9 API change)
 - Updated GitHub Actions to Node.js 24 compatible versions
   - `actions/checkout@v4` -> `v5`
   - `actions/cache@v4` -> `v5`
   - `actions/create-release@v1` -> `softprops/action-gh-release@v2`
+
+### Added
+- `hash32` dependency for `FnvHasher` (required by heapless 0.9 `IndexMap`)
 
 ## [0.3.0] - 2026-03-27
 
