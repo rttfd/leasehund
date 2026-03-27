@@ -151,7 +151,8 @@ use core::net::Ipv4Addr;
 use embassy_net::Stack;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Timer};
-use heapless::Vec;
+use hash32::{BuildHasherDefault, FnvHasher};
+use heapless::{IndexMap, Vec};
 use smoltcp::phy::PacketMeta;
 
 /// Reexported types from Embassy for convenience
@@ -607,7 +608,7 @@ pub struct DhcpServer<
     /// Server configuration
     config: DhcpConfig<MAX_DNS>,
     /// Hash map storing active leases, keyed by client MAC address
-    leases: heapless::FnvIndexMap<[u8; 6], LeaseEntry, MAX_CLIENTS>,
+    leases: IndexMap<[u8; 6], LeaseEntry, BuildHasherDefault<FnvHasher>, MAX_CLIENTS>,
 }
 
 impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX_DNS> {
@@ -663,7 +664,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         };
         Self {
             config,
-            leases: heapless::FnvIndexMap::new(),
+            leases: IndexMap::new(),
         }
     }
 
@@ -723,7 +724,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         };
         Self {
             config,
-            leases: heapless::FnvIndexMap::new(),
+            leases: IndexMap::new(),
         }
     }
 
@@ -760,7 +761,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// ```
     #[must_use]
     pub const fn with_config(config: DhcpConfig<MAX_DNS>) -> Self {
-        let leases = heapless::FnvIndexMap::new();
+        let leases = IndexMap::new();
         Self { config, leases }
     }
 
