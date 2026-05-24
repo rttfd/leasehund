@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-24
+
+### Breaking Changes
+- **Removed `new_with_dns`**: `DhcpServer::new()` now takes the DNS server parameter directly and uses it (previously the `new()` constructor silently ignored it). Use `new()` everywhere you used `new_with_dns()`.
+- **Removed `socket_buffer_size` from `DhcpConfig`**: This field was never used; UDP buffers are fixed at 1024 bytes.
+- **`DhcpConfigBuilder::new()` starts with no DNS servers**: Previously pre-populated with `8.8.8.8`. Add DNS servers explicitly with `.add_dns_server()`.
+- **`LeaseEntry.lease_time` renamed to `expires_at`**: Internal change, affects code that directly constructs `LeaseEntry` in tests.
+
+### Added
+- **Lease expiry enforcement**: Expired leases are automatically purged before each packet is processed. New public method `purge_expired_leases()`.
+- **IP reservation on OFFER**: Offered IPs are reserved with a 60-second TTL to prevent duplicate offers to concurrent clients.
+- Additional unit tests: `config_builder_starts_with_no_dns`, `config_builder_no_router`, `get_next_available_ip_empty`, `get_next_available_ip_skips_leased`, `parse_message_type_*`.
+
+### Fixed
+- **Unsound pointer cast**: Replaced `&*data.as_ptr().cast::<DhcpPacket>()` with `core::ptr::read_unaligned()` to avoid undefined behavior on unaligned UDP buffer data.
+- **Unsound serialization**: Replaced `core::slice::from_raw_parts` with `core::mem::transmute` to a byte array for safe packed struct serialization.
+- **Async bloat**: Consolidated duplicated `send_to().await` calls across DISCOVER/REQUEST match arms into a single suspend point, reducing the generated state machine size.
+
+### Removed
+- `DhcpServer::new_with_dns()` (use `new()` instead)
+- `DhcpConfig::socket_buffer_size` field
+- `DhcpConfigBuilder::socket_buffer_size()` method
+- `#[allow(dead_code)]` on `LeaseEntry`
+- `#[allow(clippy::unused_self)]` on static method `parse_message_type`
+
 ## [0.4.0] - 2026-03-27
 
 ### Changed

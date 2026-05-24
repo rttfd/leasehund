@@ -25,3 +25,4 @@ target
 
 /target
 Cargo.lock
+.agents

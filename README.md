@@ -17,10 +17,12 @@ Leasehund provides a minimal DHCP server implementation designed for embedded sy
 - **No-std compatible**: Designed for embedded systems without heap allocation
 - **Embassy integration**: Built on top of Embassy async runtime and networking stack
 - **Configurable IP pools**: Define custom IP address ranges for client assignment
-- **Lease management**: Automatic lease tracking with configurable timeouts
-- **Essential DHCP options**: Supports subnet mask, router, DNS server configuration
+- **Lease expiry**: Expired leases are automatically reclaimed before each allocation
+- **IP reservation**: Offered IPs are reserved to prevent duplicate offers
+- **Multiple DNS servers**: Support for up to N DNS servers (compile-time const generic)
+- **Optional router configuration**: Router/gateway can be disabled if not needed
+- **Builder pattern**: Fluent API for easy configuration
 - **Memory efficient**: Uses heapless data structures with compile-time size limits
-- **Safe**: Written in safe Rust with comprehensive error handling
 
 ## Quick Start
 
@@ -28,7 +30,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-leasehund = "0.4"
+leasehund = "0.5"
 ```
 
 ## Usage
@@ -46,8 +48,7 @@ async fn main(_spawner: Spawner) {
     // Initialize your embassy network stack here
     let stack = /* ... your network stack initialization ... */;
 
-    // Create DHCP server with explicit const generics
-    let mut dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
+    let mut server = DhcpServer::<32, 4>::new(
         Ipv4Addr::new(192, 168, 1, 1),    // Server IP
         Ipv4Addr::new(255, 255, 255, 0),  // Subnet mask
         Ipv4Addr::new(192, 168, 1, 1),    // Router/Gateway
@@ -57,7 +58,7 @@ async fn main(_spawner: Spawner) {
     );
 
     // Run the DHCP server (this will loop forever)
-    dhcp_server.run(stack).await;
+    server.run(stack).await;
 }
 ```
 
@@ -76,18 +77,15 @@ The DHCP server requires the following configuration parameters:
 | `ip_pool_start` | First IP in the assignable range | `192.168.1.100` |
 | `ip_pool_end`   | Last IP in the assignable range  | `192.168.1.200` |
 
-### Advanced Configuration
-
-
 ### Advanced Configuration (Builder Pattern)
 
-You can use the builder API to customize all key DHCP server parameters at runtime (const generics for sizing):
+Use the builder API for multiple DNS servers and custom options:
 
 ```rust
 use core::net::Ipv4Addr;
 use leasehund::{DhcpConfigBuilder, DhcpServer};
 
-let config: leasehund::DhcpConfig<4> = DhcpConfigBuilder::<4>::new()
+let config = DhcpConfigBuilder::<4>::new()
     .server_ip(Ipv4Addr::new(10, 0, 1, 1))
     .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
     .router(Ipv4Addr::new(10, 0, 1, 1))
@@ -95,13 +93,12 @@ let config: leasehund::DhcpConfig<4> = DhcpConfigBuilder::<4>::new()
     .add_dns_server(Ipv4Addr::new(1, 0, 0, 1))
     .ip_pool(Ipv4Addr::new(10, 0, 100, 1), Ipv4Addr::new(10, 0, 199, 254))
     .lease_time(7200) // 2 hours
-    .socket_buffer_size(2048)
     .build();
 
 let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 ```
 
-**Note:** The maximum number of concurrent leases and DNS servers are now compile-time constants set via const generics (e.g., `DhcpServer::<32, 4>`).
+**Note:** The builder starts with **no DNS servers**. Use `.add_dns_server()` to add them. The maximum number of concurrent leases and DNS servers are compile-time constants set via const generics (e.g., `DhcpServer::<32, 4>`).
 
 ## Supported DHCP Messages
 
@@ -122,42 +119,39 @@ The server automatically includes these standard DHCP options in responses:
 - **Option 53**: DHCP Message Type
 - **Option 54**: Server Identifier
 
-
-## Advanced uscase
+## Advanced Usage
 
 In case you need to handle lease/release events of each new client you can use the `lease_one` method:
 
 ```rust
 use core::net::Ipv4Addr;
-use leasehund::{DhcpServer, DHCPServerSocket, TransactionEvent};
+use leasehund::{DhcpServer, DhcpConfigBuilder, DHCPServerSocket, DHCPServerBuffers, TransactionEvent};
 use embassy_net::Stack;
-use core::net::Ipv4Addr;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     // Initialize your embassy network stack here
     let stack = /* ... your network stack initialization ... */;
-    
-    let config: DhcpConfig<4> = DhcpConfigBuilder::new()
+
+    let config = DhcpConfigBuilder::<4>::new()
         .server_ip(Ipv4Addr::new(10, 0, 1, 1))
         .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
         .router(Ipv4Addr::new(10, 0, 1, 1))
-        .add_dns_server(Ipv4Addr::new(1, 1, 1, 1))      // Cloudflare DNS
-        .add_dns_server(Ipv4Addr::new(1, 0, 0, 1))      // Cloudflare backup
-        .add_dns_server(Ipv4Addr::new(8, 8, 8, 8))      // Google DNS
+        .add_dns_server(Ipv4Addr::new(1, 1, 1, 1))
+        .add_dns_server(Ipv4Addr::new(1, 0, 0, 1))
+        .add_dns_server(Ipv4Addr::new(8, 8, 8, 8))
         .ip_pool(
             Ipv4Addr::new(10, 0, 100, 1),
             Ipv4Addr::new(10, 0, 199, 254)
         )
-        .lease_time(7200)    // 2 hours
+        .lease_time(7200)
         .build();
-    
-    let mut dhcp_server: DhcpServer<32, 4> = DhcpServer::with_config(config);
+
+    let mut server: DhcpServer<32, 4> = DhcpServer::with_config(config);
     let mut buffers = DHCPServerBuffers::new();
     let mut socket = DHCPServerSocket::new(stack, &mut buffers);
     loop {
-        let Ok(event) = server.lease_one(&socket).await else {
-            // Handle error (e.g., log it)
+        let Ok(event) = server.lease_one(&mut socket).await else {
             continue;
         };
 
@@ -183,7 +177,7 @@ Leasehund is compliant with [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131) a
 
 The server uses fixed-size data structures to ensure predictable memory usage:
 
-- **Lease Storage**: `FnvIndexMap` with maximum number of entries set by the const generic parameter (e.g., `DhcpServer::<32, 4>`, compile-time fixed)
+- **Lease Storage**: `FnvIndexMap` with maximum entries set by const generic (e.g., `DhcpServer::<32, 4>`)
 - **Packet Buffers**: 1KB RX/TX buffers for UDP socket
 - **Response Packets**: Maximum 576 bytes per DHCP response
 
@@ -199,7 +193,7 @@ The server uses fixed-size data structures to ensure predictable memory usage:
 ### Simple Home Network
 
 ```rust
-let dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
+let server = DhcpServer::<32, 4>::new(
     Ipv4Addr::new(192, 168, 1, 1),    // Router IP
     Ipv4Addr::new(255, 255, 255, 0),  // /24 network
     Ipv4Addr::new(192, 168, 1, 1),    // Gateway
@@ -212,7 +206,7 @@ let dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
 ### Corporate Network
 
 ```rust
-let dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
+let server = DhcpServer::<32, 4>::new(
     Ipv4Addr::new(10, 0, 1, 1),       // Server IP
     Ipv4Addr::new(255, 255, 0, 0),    // /16 network
     Ipv4Addr::new(10, 0, 1, 1),       // Gateway
@@ -226,10 +220,9 @@ let dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
 
 - **IPv4 Only**: IPv6 is not supported
 - **Lease Time**: Configurable at runtime via `DhcpConfig`/`DhcpConfigBuilder` (default 24 hours)
-- **Sizing**: Maximum clients and DNS servers are compile-time constants set via const generics (e.g., `DhcpServer::<32, 4>`)
+- **Sizing**: Maximum clients and DNS servers are compile-time constants set via const generics
 - **Basic Options**: Limited to essential DHCP options
 - **No Relay**: DHCP relay functionality not implemented
-- **Client Limit**: Maximum of 32 concurrent clients (compile-time fixed, set via const generics, e.g., `DhcpServer::<32, 4>`)
 
 ## Requirements
 
@@ -247,8 +240,7 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 ```bash
 git clone https://github.com/rttfd/leasehund.git
 cd leasehund
-cargo build
-cargo test
+make ci
 ```
 
 ## License
