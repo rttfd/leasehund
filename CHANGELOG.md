@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-06-03
+
+### Added
+
+- `DhcpServer::run_with_callback()` — runs the DHCP server forever while invoking a caller-provided callback for every `TransactionEvent` (lease assigned, lease released). This allows downstream code to react to DHCP lifecycle events without replacing the built-in `run()` loop.
+
 ## [0.5.0] - 2026-05-24
 
 ### Breaking Changes
