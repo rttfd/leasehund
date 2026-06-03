@@ -23,6 +23,11 @@ help: ## Show this help message
 # Rust version - keep in sync with .github/workflows/ci.yml
 RUST_VERSION := 1.91
 
+.PHONY: install-hooks
+install-hooks: ## Install git hooks (prevents direct push to main)
+	git config core.hooksPath .githooks
+	@echo "Git hooks installed from .githooks/"
+
 .PHONY: install-rust
 install-rust: ## Install Rust toolchain with required components
 	rustup toolchain install $(RUST_VERSION)
