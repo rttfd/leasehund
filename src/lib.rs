@@ -932,13 +932,57 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// ```
     #[allow(clippy::future_not_send)]
     pub async fn run(&mut self, stack: Stack<'_>) -> ! {
+        self.run_with_callback(stack, |_| {}).await
+    }
+
+    /// Runs the DHCP server forever, invoking `callback` for every lease event.
+    ///
+    /// This is identical to [`run`](Self::run) except that `TransactionEvent`s
+    /// are forwarded to the caller via `callback` instead of being discarded.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use embassy_net::Stack;
+    /// use leasehund::{DhcpServer, TransactionEvent};
+    /// use core::net::Ipv4Addr;
+    ///
+    /// # async fn example(stack: Stack<'static>) {
+    /// let mut server = DhcpServer::<32, 4>::new(
+    ///     Ipv4Addr::new(192, 168, 1, 1),
+    ///     Ipv4Addr::new(255, 255, 255, 0),
+    ///     Ipv4Addr::new(192, 168, 1, 1),
+    ///     Ipv4Addr::new(8, 8, 8, 8),
+    ///     Ipv4Addr::new(192, 168, 1, 100),
+    ///     Ipv4Addr::new(192, 168, 1, 200),
+    /// );
+    ///
+    /// server.run_with_callback(stack, |event| {
+    ///     match event {
+    ///         TransactionEvent::Leased(ip, mac) => {
+    ///             // log or react to new lease
+    ///         }
+    ///         TransactionEvent::Released(ip, mac) => {
+    ///             // log or react to release
+    ///         }
+    ///     }
+    /// }).await;
+    /// # }
+    /// ```
+    #[allow(clippy::future_not_send)]
+    pub async fn run_with_callback<F>(&mut self, stack: Stack<'_>, mut callback: F) -> !
+    where
+        F: FnMut(TransactionEvent),
+    {
         let mut buffers = DHCPServerBuffers::new();
         let socket = DHCPServerSocket::new(stack, &mut buffers);
         loop {
             let mut buf = [0u8; DHCP_PACKET_SIZE];
             match socket.socket.recv_from(&mut buf).await {
                 Ok((len, _)) => {
-                    let _ = self.handle_packet(&socket, &buf[..len]).await;
+                    if let Some(event) = self.handle_packet(&socket, &buf[..len]).await {
+                        callback(event);
+                    }
                 }
                 Err(_) => Timer::after(Duration::from_millis(100)).await,
             }

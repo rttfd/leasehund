@@ -167,6 +167,45 @@ async fn main(_spawner: Spawner) {
 }
 ```
 
+### Event Callbacks
+
+If you want the convenience of `run()` but still need to react to lease events, use `run_with_callback()`:
+
+```rust
+use core::net::Ipv4Addr;
+use leasehund::{DhcpServer, DhcpConfigBuilder, TransactionEvent};
+use embassy_net::Stack;
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let stack = /* ... your network stack initialization ... */;
+
+    let config = DhcpConfigBuilder::<4>::new()
+        .server_ip(Ipv4Addr::new(10, 0, 1, 1))
+        .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
+        .no_router()
+        .add_dns_server(Ipv4Addr::new(8, 8, 8, 8))
+        .ip_pool(Ipv4Addr::new(10, 0, 100, 1), Ipv4Addr::new(10, 0, 199, 254))
+        .lease_time(7200)
+        .build();
+
+    let mut server: DhcpServer<32, 4> = DhcpServer::with_config(config);
+
+    server.run_with_callback(stack, |event| {
+        match event {
+            TransactionEvent::Leased(ip, mac) => {
+                info!("New lease: {} -> {:02x?}", ip, mac);
+            }
+            TransactionEvent::Released(ip, mac) => {
+                info!("Lease released: {} -> {:02x?}", ip, mac);
+            }
+        }
+    }).await;
+}
+```
+
+This is ideal for logging, metrics, or triggering side effects (e.g., opening a firewall pinhole) when a host gets a DHCP lease.
+
 ## Protocol Compliance
 
 Leasehund is compliant with [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131) and [RFC 2132](https://www.rfc-editor.org/rfc/rfc2132). All DHCP packets include and check the required DHCP magic cookie (0x63825363, see [RFC 2132 section 2](https://www.rfc-editor.org/rfc/rfc2132#section-2)) for strict standards compliance.
