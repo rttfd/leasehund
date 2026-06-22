@@ -975,7 +975,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         F: FnMut(TransactionEvent),
     {
         let mut buffers = DHCPServerBuffers::new();
-        let socket = DHCPServerSocket::new(stack, &mut buffers);
+        let mut socket = DHCPServerSocket::new(stack, &mut buffers);
         loop {
             let mut buf = [0u8; DHCP_PACKET_SIZE];
             match socket.socket.recv_from(&mut buf).await {
@@ -983,6 +983,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
                     if let Some(event) = self.handle_packet(&socket, &buf[..len]).await {
                         callback(event);
                     }
+                    socket.socket.flush().await;
                 }
                 Err(_) => Timer::after(Duration::from_millis(100)).await,
             }
