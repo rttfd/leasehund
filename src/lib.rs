@@ -467,6 +467,18 @@ pub enum TransactionEvent {
     Released(Ipv4Addr, [u8; 6]),
 }
 
+/// DHCP message kinds that can be admitted or denied by policy.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum AdmissionEvent {
+    /// Client is asking for an offer.
+    Discover,
+    /// Client is asking for a lease acknowledgment.
+    Request,
+    /// Client is releasing an existing lease.
+    Release,
+}
+
 /// Wrapper around the Embassy UDP socket for DHCP server use.
 pub struct DHCPServerSocket<'a> {
     socket: UdpSocket<'a>,
@@ -804,11 +816,15 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
 
     /// Handles an incoming DHCP packet.
     #[allow(clippy::future_not_send)]
-    async fn handle_packet(
+    async fn handle_packet_with_filter<P>(
         &mut self,
         socket: &DHCPServerSocket<'_>,
         data: &[u8],
-    ) -> Option<TransactionEvent> {
+        allow_client: &mut P,
+    ) -> Option<TransactionEvent>
+    where
+        P: FnMut([u8; 6], AdmissionEvent) -> bool,
+    {
         // Reclaim expired leases before processing.
         self.purge_expired_leases();
 
@@ -825,13 +841,21 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
 
         let options = &data[FIXED_PART_SIZE..];
         let msg_type = Self::parse_message_type(options)?;
+        let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
 
         // Consolidate DISCOVER/REQUEST into a single .await point.
         let (resp, event) = match msg_type {
-            DHCP_DISCOVER => (Some(self.make_response(&packet, DHCP_OFFER)), None),
+            DHCP_DISCOVER => {
+                if !allow_client(mac, AdmissionEvent::Discover) {
+                    return None;
+                }
+                (Some(self.make_response(&packet, DHCP_OFFER)), None)
+            }
             DHCP_REQUEST => {
+                if !allow_client(mac, AdmissionEvent::Request) {
+                    return None;
+                }
                 let resp = self.make_response(&packet, DHCP_ACK);
-                let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
                 let event = self
                     .leases
                     .get(&mac)
@@ -839,7 +863,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
                 (Some(resp), event)
             }
             DHCP_RELEASE => {
-                let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
+                let _ = allow_client(mac, AdmissionEvent::Release);
                 let entry = self.leases.remove(&mac);
                 return entry.map(|e| TransactionEvent::Released(e.ip, e.mac));
             }
@@ -890,11 +914,28 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         &mut self,
         socket: &mut DHCPServerSocket<'_>,
     ) -> Result<TransactionEvent, RecvError> {
+        self.lease_one_with_filter(socket, |_, _| true).await
+    }
+
+    /// Processes packets until a single lease or release transaction completes, while applying
+    /// a caller-provided admission policy before OFFER/ACK responses are sent.
+    #[allow(clippy::future_not_send)]
+    pub async fn lease_one_with_filter<P>(
+        &mut self,
+        socket: &mut DHCPServerSocket<'_>,
+        mut allow_client: P,
+    ) -> Result<TransactionEvent, RecvError>
+    where
+        P: FnMut([u8; 6], AdmissionEvent) -> bool,
+    {
         loop {
             let mut buf = [0u8; DHCP_PACKET_SIZE];
             match socket.socket.recv_from(&mut buf).await {
                 Ok((len, _)) => {
-                    if let Some(event) = self.handle_packet(socket, &buf[..len]).await {
+                    if let Some(event) = self
+                        .handle_packet_with_filter(socket, &buf[..len], &mut allow_client)
+                        .await
+                    {
                         socket.socket.flush().await;
                         return Ok(event);
                     }
@@ -932,7 +973,8 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// ```
     #[allow(clippy::future_not_send)]
     pub async fn run(&mut self, stack: Stack<'_>) -> ! {
-        self.run_with_callback(stack, |_| {}).await
+        self.run_with_filter_and_callback(stack, |_, _| true, |_| {})
+            .await
     }
 
     /// Runs the DHCP server forever, invoking `callback` for every lease event.
@@ -970,8 +1012,25 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// # }
     /// ```
     #[allow(clippy::future_not_send)]
-    pub async fn run_with_callback<F>(&mut self, stack: Stack<'_>, mut callback: F) -> !
+    pub async fn run_with_callback<F>(&mut self, stack: Stack<'_>, callback: F) -> !
     where
+        F: FnMut(TransactionEvent),
+    {
+        self.run_with_filter_and_callback(stack, |_, _| true, callback)
+            .await
+    }
+
+    /// Runs the DHCP server forever, applying a caller-provided admission policy before OFFER/ACK
+    /// responses are sent and invoking `callback` for every lease event that completes.
+    #[allow(clippy::future_not_send)]
+    pub async fn run_with_filter_and_callback<P, F>(
+        &mut self,
+        stack: Stack<'_>,
+        mut allow_client: P,
+        mut callback: F,
+    ) -> !
+    where
+        P: FnMut([u8; 6], AdmissionEvent) -> bool,
         F: FnMut(TransactionEvent),
     {
         let mut buffers = DHCPServerBuffers::new();
@@ -980,7 +1039,10 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
             let mut buf = [0u8; DHCP_PACKET_SIZE];
             match socket.socket.recv_from(&mut buf).await {
                 Ok((len, _)) => {
-                    if let Some(event) = self.handle_packet(&socket, &buf[..len]).await {
+                    if let Some(event) = self
+                        .handle_packet_with_filter(&socket, &buf[..len], &mut allow_client)
+                        .await
+                    {
                         callback(event);
                     }
                     socket.socket.flush().await;
