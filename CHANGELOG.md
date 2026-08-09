@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Optional DHCP admission-policy hooks via `AdmissionEvent`, `lease_one_with_filter()`, and `run_with_filter_and_callback()`. These allow callers to suppress `DHCPOFFER` / `DHCPACK` responses before they are sent while preserving existing default behavior.
+
 ## [0.5.2] - 2026-06-22
 
 ### Fixed
@@ -20,22 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0] - 2026-05-24
 
 ### Breaking Changes
+
 - **Removed `new_with_dns`**: `DhcpServer::new()` now takes the DNS server parameter directly and uses it (previously the `new()` constructor silently ignored it). Use `new()` everywhere you used `new_with_dns()`.
 - **Removed `socket_buffer_size` from `DhcpConfig`**: This field was never used; UDP buffers are fixed at 1024 bytes.
 - **`DhcpConfigBuilder::new()` starts with no DNS servers**: Previously pre-populated with `8.8.8.8`. Add DNS servers explicitly with `.add_dns_server()`.
 - **`LeaseEntry.lease_time` renamed to `expires_at`**: Internal change, affects code that directly constructs `LeaseEntry` in tests.
 
 ### Added
+
 - **Lease expiry enforcement**: Expired leases are automatically purged before each packet is processed. New public method `purge_expired_leases()`.
 - **IP reservation on OFFER**: Offered IPs are reserved with a 60-second TTL to prevent duplicate offers to concurrent clients.
 - Additional unit tests: `config_builder_starts_with_no_dns`, `config_builder_no_router`, `get_next_available_ip_empty`, `get_next_available_ip_skips_leased`, `parse_message_type_*`.
 
 ### Fixed
+
 - **Unsound pointer cast**: Replaced `&*data.as_ptr().cast::<DhcpPacket>()` with `core::ptr::read_unaligned()` to avoid undefined behavior on unaligned UDP buffer data.
 - **Unsound serialization**: Replaced `core::slice::from_raw_parts` with `core::mem::transmute` to a byte array for safe packed struct serialization.
 - **Async bloat**: Consolidated duplicated `send_to().await` calls across DISCOVER/REQUEST match arms into a single suspend point, reducing the generated state machine size.
 
 ### Removed
+
 - `DhcpServer::new_with_dns()` (use `new()` instead)
 - `DhcpConfig::socket_buffer_size` field
 - `DhcpConfigBuilder::socket_buffer_size()` method
@@ -45,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-03-27
 
 ### Changed
+
 - Bumped MSRV to Rust 1.91
 - Updated dependencies to latest versions
   - `embassy-net` 0.8.0 -> 0.9.0
@@ -58,11 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `actions/create-release@v1` -> `softprops/action-gh-release@v2`
 
 ### Added
+
 - `hash32` dependency for `FnvHasher` (required by heapless 0.9 `IndexMap`)
 
 ## [0.3.0] - 2026-03-27
 
 ### Added
+
 - Makefile with development commands (`make ci`, `make test`, `make publish`, etc.)
 - CHANGELOG.md
 - `DHCPServerBuffers` struct for pre-allocated UDP buffers (@kdimonych)
@@ -71,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `lease_one` method for manual transaction handling (@kdimonych)
 
 ### Changed
+
 - Updated `embassy-net` from 0.7.0 to 0.8.0 (@arctan2, @liebman)
 - Updated `embassy-time` (@liebman)
 - GitHub workflows now use Makefile commands for consistency
@@ -82,11 +96,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0]
 
 ### Changed
+
 - Version bump
 
 ## [0.1.0]
 
 ### Added
+
 - Initial release
 - Basic DHCP server implementation for `no_std` environments
 - Embassy async runtime integration
