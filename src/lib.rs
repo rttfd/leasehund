@@ -467,7 +467,12 @@ pub enum TransactionEvent {
     Released(Ipv4Addr, [u8; 6]),
 }
 
-/// DHCP message kinds that can be admitted or denied by policy.
+/// DHCP message kinds reported to an admission policy.
+///
+/// Returning `false` for [`Discover`](Self::Discover) or [`Request`](Self::Request) silently
+/// suppresses the corresponding response. A client's MAC address is not an authentication
+/// mechanism and can be spoofed, so admission policies should not be treated as a security
+/// boundary.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum AdmissionEvent {
@@ -476,7 +481,16 @@ pub enum AdmissionEvent {
     /// Client is asking for a lease acknowledgment.
     Request,
     /// Client is releasing an existing lease.
+    ///
+    /// Releases are always processed; the policy's return value is ignored. Completed releases
+    /// are also reported through [`TransactionEvent::Released`].
     Release,
+}
+
+/// An action produced by processing a received DHCP packet.
+struct PacketAction {
+    response: Option<Vec<u8, DHCP_PACKET_SIZE>>,
+    event: Option<TransactionEvent>,
 }
 
 /// Wrapper around the Embassy UDP socket for DHCP server use.
@@ -814,14 +828,12 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         bytes
     }
 
-    /// Handles an incoming DHCP packet.
-    #[allow(clippy::future_not_send)]
-    async fn handle_packet_with_filter<P>(
+    /// Validates and processes an incoming DHCP packet before any response is sent.
+    fn prepare_packet_with_filter<P>(
         &mut self,
-        socket: &DHCPServerSocket<'_>,
         data: &[u8],
         allow_client: &mut P,
-    ) -> Option<TransactionEvent>
+    ) -> Option<PacketAction>
     where
         P: FnMut([u8; 6], AdmissionEvent) -> bool,
     {
@@ -843,13 +855,15 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         let msg_type = Self::parse_message_type(options)?;
         let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
 
-        // Consolidate DISCOVER/REQUEST into a single .await point.
-        let (resp, event) = match msg_type {
+        match msg_type {
             DHCP_DISCOVER => {
                 if !allow_client(mac, AdmissionEvent::Discover) {
                     return None;
                 }
-                (Some(self.make_response(&packet, DHCP_OFFER)), None)
+                Some(PacketAction {
+                    response: Some(self.make_response(&packet, DHCP_OFFER)),
+                    event: None,
+                })
             }
             DHCP_REQUEST => {
                 if !allow_client(mac, AdmissionEvent::Request) {
@@ -860,17 +874,39 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
                     .leases
                     .get(&mac)
                     .map(|entry| TransactionEvent::Leased(entry.ip, mac));
-                (Some(resp), event)
+                Some(PacketAction {
+                    response: Some(resp),
+                    event,
+                })
             }
             DHCP_RELEASE => {
                 let _ = allow_client(mac, AdmissionEvent::Release);
-                let entry = self.leases.remove(&mac);
-                return entry.map(|e| TransactionEvent::Released(e.ip, e.mac));
+                let event = self
+                    .leases
+                    .remove(&mac)
+                    .map(|entry| TransactionEvent::Released(entry.ip, entry.mac));
+                Some(PacketAction {
+                    response: None,
+                    event,
+                })
             }
-            _ => return None,
-        };
+            _ => None,
+        }
+    }
 
-        if let Some(resp) = resp {
+    /// Handles an incoming DHCP packet.
+    #[allow(clippy::future_not_send)]
+    async fn handle_packet_with_filter<P>(
+        &mut self,
+        socket: &DHCPServerSocket<'_>,
+        data: &[u8],
+        allow_client: &mut P,
+    ) -> Option<TransactionEvent>
+    where
+        P: FnMut([u8; 6], AdmissionEvent) -> bool,
+    {
+        let action = self.prepare_packet_with_filter(data, allow_client)?;
+        if let Some(resp) = action.response {
             let meta = embassy_net::udp::UdpMetadata {
                 endpoint: (Ipv4Addr::BROADCAST, DHCP_CLIENT_PORT).into(),
                 local_address: None,
@@ -878,8 +914,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
             };
             let _ = socket.socket.send_to(&resp, meta).await;
         }
-
-        event
+        action.event
     }
 
     /// Processes packets until a single lease or release transaction completes.
@@ -919,6 +954,13 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
 
     /// Processes packets until a single lease or release transaction completes, while applying
     /// a caller-provided admission policy before OFFER/ACK responses are sent.
+    ///
+    /// Returning `false` for a discover or request silently drops that packet without sending an
+    /// OFFER, ACK, or NAK. Releases are always processed even if the policy returns `false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecvError`] if there was an error receiving a packet.
     #[allow(clippy::future_not_send)]
     pub async fn lease_one_with_filter<P>(
         &mut self,
@@ -1022,6 +1064,9 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
 
     /// Runs the DHCP server forever, applying a caller-provided admission policy before OFFER/ACK
     /// responses are sent and invoking `callback` for every lease event that completes.
+    ///
+    /// Returning `false` for a discover or request silently drops that packet without sending an
+    /// OFFER, ACK, or NAK. Releases are always processed even if the policy returns `false`.
     #[allow(clippy::future_not_send)]
     pub async fn run_with_filter_and_callback<P, F>(
         &mut self,
@@ -1205,5 +1250,61 @@ mod tests {
     #[test]
     fn parse_message_type_end_only() {
         assert_eq!(TestServer::parse_message_type(&[super::OPTION_END]), None);
+    }
+
+    fn test_server() -> TestServer {
+        TestServer::new(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(1, 1, 1, 1),
+            Ipv4Addr::new(10, 0, 0, 100),
+            Ipv4Addr::new(10, 0, 0, 101),
+        )
+    }
+
+    fn dhcp_packet(msg_type: u8, mac: [u8; 6]) -> heapless::Vec<u8, { super::DHCP_PACKET_SIZE }> {
+        let mut packet = super::DhcpPacket::default();
+        packet.chaddr[..6].copy_from_slice(&mac);
+        let fixed: [u8; super::FIXED_PART_SIZE] = unsafe { core::mem::transmute(packet) };
+        let mut data = heapless::Vec::new();
+        data.extend_from_slice(&fixed).unwrap();
+        data.extend_from_slice(&[super::OPTION_MESSAGE_TYPE, 1, msg_type, super::OPTION_END])
+            .unwrap();
+        data
+    }
+
+    #[test]
+    fn denied_discover_produces_no_response_or_lease() {
+        let mut server = test_server();
+        let mac = [0, 1, 2, 3, 4, 5];
+        let data = dhcp_packet(super::DHCP_DISCOVER, mac);
+        let mut deny = |received_mac, event| {
+            assert_eq!(received_mac, mac);
+            assert_eq!(event, super::AdmissionEvent::Discover);
+            false
+        };
+
+        let action = server.prepare_packet_with_filter(&data, &mut deny);
+
+        assert!(action.is_none());
+        assert!(server.leases.is_empty());
+    }
+
+    #[test]
+    fn denied_request_produces_no_response_or_lease() {
+        let mut server = test_server();
+        let mac = [0, 1, 2, 3, 4, 5];
+        let data = dhcp_packet(super::DHCP_REQUEST, mac);
+        let mut deny = |received_mac, event| {
+            assert_eq!(received_mac, mac);
+            assert_eq!(event, super::AdmissionEvent::Request);
+            false
+        };
+
+        let action = server.prepare_packet_with_filter(&data, &mut deny);
+
+        assert!(action.is_none());
+        assert!(server.leases.is_empty());
     }
 }
