@@ -143,9 +143,8 @@ use core::net::Ipv4Addr;
 use embassy_net::Stack;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Timer};
-use hash32::{BuildHasherDefault, FnvHasher};
-use heapless::{IndexMap, Vec};
-use smoltcp::phy::PacketMeta;
+use heapless::Vec;
+use heapless::index_map::FnvIndexMap;
 
 /// Reexported types from Embassy for convenience
 pub use embassy_net::udp::RecvError;
@@ -573,7 +572,7 @@ pub struct DhcpServer<
     const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS,
 > {
     config: DhcpConfig<MAX_DNS>,
-    leases: IndexMap<[u8; 6], LeaseEntry, BuildHasherDefault<FnvHasher>, MAX_CLIENTS>,
+    leases: FnvIndexMap<[u8; 6], LeaseEntry, MAX_CLIENTS>,
 }
 
 impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX_DNS> {
@@ -619,7 +618,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         };
         Self {
             config,
-            leases: IndexMap::new(),
+            leases: FnvIndexMap::new(),
         }
     }
 
@@ -646,7 +645,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     pub const fn with_config(config: DhcpConfig<MAX_DNS>) -> Self {
         Self {
             config,
-            leases: IndexMap::new(),
+            leases: FnvIndexMap::new(),
         }
     }
 
@@ -907,12 +906,8 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     {
         let action = self.prepare_packet_with_filter(data, allow_client)?;
         if let Some(resp) = action.response {
-            let meta = embassy_net::udp::UdpMetadata {
-                endpoint: (Ipv4Addr::BROADCAST, DHCP_CLIENT_PORT).into(),
-                local_address: None,
-                meta: PacketMeta::default(),
-            };
-            let _ = socket.socket.send_to(&resp, meta).await;
+            let endpoint = (Ipv4Addr::BROADCAST, DHCP_CLIENT_PORT);
+            let _ = socket.socket.send_to(&resp, endpoint).await;
         }
         action.event
     }
