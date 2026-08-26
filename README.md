@@ -19,6 +19,7 @@ Leasehund provides a minimal DHCP server implementation designed for embedded sy
 - **Configurable IP pools**: Define custom IP address ranges for client assignment
 - **Lease expiry**: Expired leases are automatically reclaimed before each allocation
 - **IP reservation**: Offered IPs are reserved to prevent duplicate offers
+- **Admission policy hooks**: Optionally suppress offers and acknowledgments by client MAC
 - **Multiple DNS servers**: Support for up to N DNS servers (compile-time const generic)
 - **Optional router configuration**: Router/gateway can be disabled if not needed
 - **Builder pattern**: Fluent API for easy configuration
@@ -30,7 +31,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-leasehund = "0.5"
+leasehund = "0.6"
 ```
 
 ## Usage
@@ -205,6 +206,30 @@ async fn main(_spawner: Spawner) {
 ```
 
 This is ideal for logging, metrics, or triggering side effects (e.g., opening a firewall pinhole) when a host gets a DHCP lease.
+
+### Admission Policies
+
+Use `run_with_filter_and_callback()` to decide whether a client may receive a DHCP offer or acknowledgment before the response is sent:
+
+```rust
+use leasehund::AdmissionEvent;
+
+const BLOCKED_CLIENT: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+// Construct `server` and initialize `stack` as shown above.
+server.run_with_filter_and_callback(
+    stack,
+    |mac, event| match event {
+        AdmissionEvent::Discover | AdmissionEvent::Request => mac != BLOCKED_CLIENT,
+        AdmissionEvent::Release => true,
+    },
+    |_event| {
+        // Handle completed lease and release events if needed.
+    },
+).await;
+```
+
+Returning `false` for `Discover` or `Request` silently drops the packet without sending an OFFER, ACK, or NAK. Releases are always processed. MAC addresses can be spoofed, so this hook provides policy control rather than an authentication or security boundary. For manual transaction handling, use `lease_one_with_filter()`.
 
 ## Protocol Compliance
 

@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.6.0] - 2026-08-26
+
 ### Added
 
-- Optional DHCP admission-policy hooks via `AdmissionEvent`, `lease_one_with_filter()`, and `run_with_filter_and_callback()`. These allow callers to suppress `DHCPOFFER` / `DHCPACK` responses before they are sent while preserving existing default behavior.
+- Optional DHCP admission-policy hooks via `AdmissionEvent`, `lease_one_with_filter()`, and `run_with_filter_and_callback()`. Callers can suppress `DHCPOFFER` and `DHCPACK` responses before they are sent while preserving existing default behavior.
+
+### Changed
+
+- Updated the optional `defmt` dependency to 1.1.1.
+- Removed unnecessary direct `hash32` and `smoltcp` dependencies. Lease storage now uses `heapless::FnvIndexMap`, and UDP packet metadata uses Embassy's compatible default type.
 
 ## [0.5.2] - 2026-06-22
 
@@ -109,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable IP pools and lease management
 - Essential DHCP options support (subnet mask, router, DNS)
 
+[Unreleased]: https://github.com/rttfd/leasehund/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/rttfd/leasehund/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/rttfd/leasehund/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/rttfd/leasehund/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/rttfd/leasehund/compare/v0.4.0...v0.5.0
