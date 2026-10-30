@@ -421,12 +421,6 @@ make ci
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Acknowledgments
-
-- Built with [Embassy](https://embassy.dev/) - Modern embedded framework for Rust
-- Uses [smoltcp](https://github.com/smoltcp-rs/smoltcp) for network protocol implementation
-- Inspired by the need for lightweight DHCP servers in embedded IoT applications
-
 ---
 
 **Leasehund** - Because every good network needs a reliable dog to fetch IP addresses!
