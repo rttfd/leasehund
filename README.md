@@ -19,6 +19,14 @@ Leasehund provides a minimal DHCP server implementation designed for embedded sy
 - **Configurable IP pools**: Define custom IP address ranges for client assignment
 - **Lease expiry**: Expired leases are automatically reclaimed before each allocation
 - **IP reservation**: Offered IPs are reserved to prevent duplicate offers
+- **RFC 2131 request handling**: `DHCPNAK` for wrong addresses, server-identifier checks for multi-server networks, INIT-REBOOT and renewal handling, and graceful recovery after the server restarts
+- **Static leases**: Pin a MAC address to a fixed IP with `add_static_lease()`
+- **Address-conflict handling**: Addresses reported by `DHCPDECLINE` are withheld for 10 minutes
+- **`DHCPINFORM`**: Configuration for clients with a manually set address
+- **Several subnets**: Extra `SubnetPool`s serve clients behind DHCP relay agents, each with its own range, mask and router
+- **Client host names**: The name a client sends (option 12) is kept with its lease and reported with lease events
+- **Lease inspection**: `leases()`, `lease_for()` and `revoke()` for status pages and admin tools
+- **Configuration validation**: `DhcpConfig::validate()` / `DhcpConfigBuilder::try_build()` catch pools outside the subnet and similar mistakes
 - **Admission policy hooks**: Optionally suppress offers and acknowledgments by client MAC
 - **Multiple DNS servers**: Support for up to N DNS servers (compile-time const generic)
 - **Optional router configuration**: Router/gateway can be disabled if not needed
@@ -105,9 +113,11 @@ let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 
 | Message Type | Description                            | Server Response             |
 | ------------ | -------------------------------------- | --------------------------- |
-| **DISCOVER** | Client broadcast to find DHCP servers  | **OFFER** with available IP |
-| **REQUEST**  | Client request for specific IP address | **ACK** confirming lease    |
+| **DISCOVER** | Client broadcast to find DHCP servers  | **OFFER** with the client's static, current, requested or next free IP; no response when nothing is free |
+| **REQUEST**  | Client request for specific IP address | **ACK** confirming lease, or **NAK** if the address is wrong or taken; no response if it is meant for another server |
+| **DECLINE**  | Client found the address already in use | Address withheld for 10 minutes (no response) |
 | **RELEASE**  | Client releasing IP address            | Lease removal (no response) |
+| **INFORM**   | Client with a fixed address asking for configuration | **ACK** with configuration, no lease |
 
 ## DHCP Options Supported
 
@@ -116,9 +126,14 @@ The server automatically includes these standard DHCP options in responses:
 - **Option 1**: Subnet Mask
 - **Option 3**: Router (Default Gateway)
 - **Option 6**: Domain Name Server (DNS)
+- **Option 15**: Domain Name (when configured with `domain_name()`)
+- **Option 28**: Broadcast Address
 - **Option 51**: IP Address Lease Time
 - **Option 53**: DHCP Message Type
 - **Option 54**: Server Identifier
+- **Option 58 / 59**: Renewal (T1) and Rebinding (T2) Time
+
+It reads options 12 (Host Name), 50 (Requested IP Address), 53 and 54 from clients.
 
 ## Advanced Usage
 
@@ -220,8 +235,11 @@ const BLOCKED_CLIENT: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 server.run_with_filter_and_callback(
     stack,
     |mac, event| match event {
-        AdmissionEvent::Discover | AdmissionEvent::Request => mac != BLOCKED_CLIENT,
-        AdmissionEvent::Release => true,
+        AdmissionEvent::Discover | AdmissionEvent::Request | AdmissionEvent::Inform => {
+            mac != BLOCKED_CLIENT
+        }
+        // Releases are processed regardless; `AdmissionEvent` is non-exhaustive.
+        _ => true,
     },
     |_event| {
         // Handle completed lease and release events if needed.
@@ -229,7 +247,97 @@ server.run_with_filter_and_callback(
 ).await;
 ```
 
-Returning `false` for `Discover` or `Request` silently drops the packet without sending an OFFER, ACK, or NAK. Releases are always processed. MAC addresses can be spoofed, so this hook provides policy control rather than an authentication or security boundary. For manual transaction handling, use `lease_one_with_filter()`.
+Returning `false` for `Discover`, `Request` or `Inform` silently drops the packet without sending an OFFER, ACK, or NAK. Releases are always processed. MAC addresses can be spoofed, so this hook provides policy control rather than an authentication or security boundary. For manual transaction handling, use `lease_one_with_filter()`.
+
+### Static Leases and Lease Inspection
+
+```rust
+use core::net::Ipv4Addr;
+use leasehund::DhcpServer;
+
+let mut server = DhcpServer::<32, 4>::new(
+    Ipv4Addr::new(192, 168, 1, 1),
+    Ipv4Addr::new(255, 255, 255, 0),
+    Ipv4Addr::new(192, 168, 1, 1),
+    Ipv4Addr::new(8, 8, 8, 8),
+    Ipv4Addr::new(192, 168, 1, 100),
+    Ipv4Addr::new(192, 168, 1, 200),
+);
+
+// The printer always gets .50, even though it is outside the pool.
+server
+    .add_static_lease([0x00, 0x11, 0x22, 0x33, 0x44, 0x55], Ipv4Addr::new(192, 168, 1, 50))
+    .unwrap();
+
+for lease in server.leases() {
+    // lease.ip, lease.mac, lease.expires_at_ms, lease.bound
+}
+```
+
+### Serving Several Subnets Through Relays
+
+Clients on other subnets reach the server through a DHCP relay agent (often the router), which
+forwards their broadcasts with its own address in `giaddr`. Add a `SubnetPool` per subnet; the
+server picks the pool containing the relay's address and replies through the relay:
+
+```rust
+use core::net::Ipv4Addr;
+use leasehund::{DhcpServer, SubnetPool};
+
+let mut server = DhcpServer::<32, 4>::new(
+    Ipv4Addr::new(192, 168, 1, 1),
+    Ipv4Addr::new(255, 255, 255, 0),
+    Ipv4Addr::new(192, 168, 1, 1),
+    Ipv4Addr::new(8, 8, 8, 8),
+    Ipv4Addr::new(192, 168, 1, 100),
+    Ipv4Addr::new(192, 168, 1, 200),
+);
+// Sensors on 192.168.2.0/24 behind the relay at 192.168.2.1.
+server
+    .add_pool(
+        SubnetPool::new(
+            Ipv4Addr::new(255, 255, 255, 0),
+            Ipv4Addr::new(192, 168, 2, 100),
+            Ipv4Addr::new(192, 168, 2, 200),
+        )
+        .with_router(Ipv4Addr::new(192, 168, 2, 1)),
+    )
+    .unwrap();
+```
+
+Pools may not overlap each other or the server's subnet. Up to `MAX_POOLS` (the fourth const
+generic, default 4) can be added. Static leases on a pool's subnet work once the pool exists.
+
+### Client Host Names
+
+`run_with_lease_callback()` passes the `Lease` with every event; its `hostname` is the name the
+client sent, if any (cut to 32 bytes):
+
+```rust,ignore
+server.run_with_lease_callback(stack, |_, _| true, |event, lease| {
+    if let (TransactionEvent::Leased(ip, _), Some(name)) = (event, lease.hostname) {
+        // show "{name} -> {ip}" on a status page
+    }
+}).await;
+```
+
+`lease_one_with_lease()` does the same for manual transaction handling, and `leases()` /
+`lease_for()` include the host name too.
+
+### Validating the Configuration
+
+```rust
+use core::net::Ipv4Addr;
+use leasehund::{ConfigError, DhcpConfigBuilder};
+
+let result = DhcpConfigBuilder::<4>::new()
+    .server_ip(Ipv4Addr::new(10, 0, 0, 1))
+    .subnet_mask(Ipv4Addr::new(255, 255, 255, 0))
+    .ip_pool(Ipv4Addr::new(10, 0, 0, 100), Ipv4Addr::new(10, 0, 0, 200))
+    .try_build();
+// The builder's default router (192.168.1.1) is not on 10.0.0.0/24.
+assert_eq!(result.unwrap_err(), ConfigError::RouterOutsideSubnet);
+```
 
 ## Protocol Compliance
 
@@ -241,7 +349,8 @@ Leasehund is compliant with [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131) a
 
 The server uses fixed-size data structures to ensure predictable memory usage:
 
-- **Lease Storage**: `FnvIndexMap` with maximum entries set by const generic (e.g., `DhcpServer::<32, 4>`)
+- **Lease Storage**: `FnvIndexMap` with maximum entries set by const generic (e.g., `DhcpServer::<32, 4>`); the client count must be a power of two
+- **Static Leases**: Up to `MAX_STATIC` entries, the third const generic (default 8)
 - **Packet Buffers**: 1KB RX/TX buffers for UDP socket
 - **Response Packets**: Maximum 576 bytes per DHCP response
 
@@ -249,7 +358,7 @@ The server uses fixed-size data structures to ensure predictable memory usage:
 
 - **Listen Port**: UDP 67 (standard DHCP server port)
 - **Client Port**: UDP 68 (standard DHCP client port)
-- **Broadcast**: All responses sent as broadcast packets for maximum compatibility
+- **Addressing**: Replies go to the relay agent (UDP 67) for relayed requests, to the client's address when it already has one (renewals, `DHCPINFORM`), and are broadcast otherwise
 - **Packet Format**: RFC 2131 compliant DHCP packet structure
 
 ## Examples
@@ -286,7 +395,8 @@ let server = DhcpServer::<32, 4>::new(
 - **Lease Time**: Configurable at runtime via `DhcpConfig`/`DhcpConfigBuilder` (default 24 hours)
 - **Sizing**: Maximum clients and DNS servers are compile-time constants set via const generics
 - **Basic Options**: Limited to essential DHCP options
-- **No Relay**: DHCP relay functionality not implemented
+- **Leases are in memory**: They are lost when the device restarts; clients that come back with INIT-REBOOT keep their address if it is still free
+- **Relay pools**: Additional subnets share the main configuration's DNS servers, lease time and domain name; requests from relays on subnets without a pool are ignored
 
 ## Requirements
 
