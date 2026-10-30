@@ -9,9 +9,13 @@ pub const SUBNET_MASK: u8 = 1;
 pub const ROUTER: u8 = 3;
 pub const DNS_SERVER: u8 = 6;
 pub const DOMAIN_NAME: u8 = 15;
+pub const BROADCAST_ADDRESS: u8 = 28;
+pub const REQUESTED_IP: u8 = 50;
 pub const LEASE_TIME: u8 = 51;
 pub const MESSAGE_TYPE: u8 = 53;
 pub const SERVER_ID: u8 = 54;
+pub const RENEWAL_TIME: u8 = 58;
+pub const REBINDING_TIME: u8 = 59;
 
 /// Iterates over `(code, value)` pairs of a DHCP option field.
 ///
@@ -61,6 +65,12 @@ pub fn find(data: &[u8], code: u8) -> Option<&[u8]> {
     Options::new(data).find(|(c, _)| *c == code).map(|(_, v)| v)
 }
 
+/// The value of option `code` as an IPv4 address, if present and 4 bytes long.
+pub fn find_ipv4(data: &[u8], code: u8) -> Option<core::net::Ipv4Addr> {
+    let value: [u8; 4] = find(data, code)?.try_into().ok()?;
+    Some(core::net::Ipv4Addr::from(value))
+}
+
 /// The DHCP message type (option 53), if present and 1 byte long.
 pub fn message_type(data: &[u8]) -> Option<u8> {
     match find(data, MESSAGE_TYPE)? {
@@ -72,8 +82,7 @@ pub fn message_type(data: &[u8]) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const REQUESTED_IP: u8 = 50;
+    use core::net::Ipv4Addr;
 
     #[test]
     fn iterates_options_and_skips_pad() {
@@ -118,5 +127,16 @@ mod tests {
         assert_eq!(message_type(&[MESSAGE_TYPE, 2, 1, 1]), None);
         assert_eq!(message_type(&[]), None);
         assert_eq!(message_type(&[END, MESSAGE_TYPE, 1, 1]), None);
+    }
+
+    #[test]
+    fn find_ipv4_checks_length() {
+        let data = [SERVER_ID, 4, 192, 168, 1, 1, REQUESTED_IP, 3, 1, 2, 3, END];
+        assert_eq!(
+            find_ipv4(&data, SERVER_ID),
+            Some(Ipv4Addr::new(192, 168, 1, 1))
+        );
+        assert_eq!(find_ipv4(&data, REQUESTED_IP), None);
+        assert_eq!(find_ipv4(&data, ROUTER), None);
     }
 }

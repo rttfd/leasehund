@@ -83,6 +83,9 @@
 //! - **DHCP Request**: Client request to lease a specific IP address
 //! - **DHCP ACK**: Server acknowledgment of IP address lease
 //! - **DHCP Release**: Client notification of IP address release
+//! - **DHCP NAK**: Server refusal of a request for a wrong or unavailable address
+//! - **DHCP Decline**: Client report of an address conflict; the address is withheld for a while
+//! - **DHCP Inform**: Configuration request from a client with a manually set address
 //!
 //! ## Limitations
 //!
@@ -93,8 +96,10 @@
 //! ## Network Configuration
 //!
 //! The server listens on UDP port 67 (standard DHCP server port) and sends responses
-//! to port 68 (standard DHCP client port). All responses are sent as broadcast packets
-//! to ensure compatibility with clients that don't yet have an IP address.
+//! to port 68 (standard DHCP client port). Replies to requests forwarded by a relay agent
+//! go back to the relay on port 67; replies to clients that already have an address
+//! (renewals, `DHCPINFORM`) are unicast to it; everything else is broadcast, since the
+//! client has no address yet.
 //!
 //! ## Memory Usage
 //!
@@ -161,9 +166,15 @@ const DEFAULT_MAX_CLIENTS: usize = 32;
 const DEFAULT_MAX_DNS_SERVERS: usize = 4;
 const DEFAULT_LEASE_TIME: u32 = 86400; // 24 hours in seconds
 const SOCKET_BUFFER_SIZE: usize = 1024;
+const DEFAULT_MAX_STATIC: usize = 8;
 
 /// Duration in milliseconds to reserve an offered IP before the client confirms.
 const OFFER_RESERVATION_MS: u64 = 60_000;
+/// Duration in milliseconds an address declined by a client (`DHCPDECLINE`,
+/// usually an address conflict) is withheld from the pool.
+const DECLINE_HOLD_MS: u64 = 600_000;
+/// Number of declined addresses remembered at once.
+const MAX_DECLINED: usize = 8;
 
 /// Configuration options for the DHCP server.
 ///
@@ -204,7 +215,8 @@ pub struct DhcpConfig<const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS> {
     pub ip_pool_start: Ipv4Addr,
     /// End of the IP address pool for client assignment
     pub ip_pool_end: Ipv4Addr,
-    /// Lease time in seconds (default: 24 hours)
+    /// Lease time in seconds (default: 24 hours). `u32::MAX` means an
+    /// infinite lease.
     pub lease_time: u32,
     /// Domain name handed to clients (option 15), for example `"lan"`.
     pub domain_name: Option<&'static str>,
@@ -425,8 +437,20 @@ impl<const MAX_DNS: usize> Default for DhcpConfigBuilder<MAX_DNS> {
 const DHCP_DISCOVER: u8 = 1;
 const DHCP_OFFER: u8 = 2;
 const DHCP_REQUEST: u8 = 3;
+const DHCP_DECLINE: u8 = 4;
 const DHCP_ACK: u8 = 5;
+const DHCP_NAK: u8 = 6;
 const DHCP_RELEASE: u8 = 7;
+const DHCP_INFORM: u8 = 8;
+
+/// BOOTP operation codes (RFC 951).
+const BOOTREQUEST: u8 = 1;
+const BOOTREPLY: u8 = 2;
+/// Hardware type and address length of Ethernet.
+const HTYPE_ETHERNET: u8 = 1;
+const HLEN_ETHERNET: u8 = 6;
+/// The broadcast bit of the `flags` field.
+const BROADCAST_FLAG: u16 = 0x8000;
 
 // The standard DHCP magic cookie (0x63825363).
 // Required by RFC 2132 section 2.
@@ -434,7 +458,8 @@ const DHCP_MAGIC: [u8; 4] = [0x63, 0x82, 0x53, 0x63];
 
 /// DHCP packet structure as defined in [RFC 2131](https://www.rfc-editor.org/rfc/rfc2131).
 ///
-/// Packed to match the wire format exactly.
+/// Packed to match the wire format exactly. Multi-byte integers hold the raw
+/// network-order bytes; convert with `from_be`/`to_be`.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct DhcpPacket {
@@ -488,6 +513,82 @@ struct LeaseEntry {
     ip: Ipv4Addr,
     mac: [u8; 6],
     expires_at: u64,
+    /// `false` while the address is only reserved for an outstanding offer.
+    bound: bool,
+}
+
+impl LeaseEntry {
+    const fn to_lease(self) -> Lease {
+        Lease {
+            ip: self.ip,
+            mac: self.mac,
+            expires_at_ms: self.expires_at,
+            bound: self.bound,
+        }
+    }
+}
+
+/// The subnet a request is served from, as given by [`DhcpConfig`].
+#[derive(Clone, Copy, Debug)]
+struct Subnet {
+    network: u32,
+    mask: u32,
+    router: Option<Ipv4Addr>,
+    start: u32,
+    end: u32,
+}
+
+impl Subnet {
+    const fn contains(&self, ip: Ipv4Addr) -> bool {
+        ip.to_bits() & self.mask == self.network
+    }
+
+    const fn in_pool(&self, ip: Ipv4Addr) -> bool {
+        let n = ip.to_bits();
+        self.start <= n && n <= self.end
+    }
+
+    const fn broadcast(&self) -> Ipv4Addr {
+        Ipv4Addr::from_bits(self.network | !self.mask)
+    }
+
+    /// /31 and /32 networks have no network or broadcast address.
+    const fn is_network_or_broadcast(&self, ip: Ipv4Addr) -> bool {
+        self.mask < 0xFFFF_FFFE
+            && (ip.to_bits() == self.network || ip.to_bits() == self.broadcast().to_bits())
+    }
+}
+
+/// A lease as reported by [`DhcpServer::leases`].
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Lease {
+    /// The leased address.
+    pub ip: Ipv4Addr,
+    /// The client's MAC address.
+    pub mac: [u8; 6],
+    /// When the lease (or offer reservation) expires, in milliseconds of
+    /// `embassy_time::Instant`. `u64::MAX` for an infinite lease.
+    pub expires_at_ms: u64,
+    /// `true` once the client accepted the lease (`DHCPACK` sent), `false`
+    /// while the address is only reserved for an offer.
+    pub bound: bool,
+}
+
+/// Why [`DhcpServer::add_static_lease`] failed.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum StaticLeaseError {
+    /// All `MAX_STATIC` static lease slots are in use.
+    Full,
+    /// The address is already reserved for a different MAC address.
+    AddressTaken,
+    /// The address is not inside the server's subnet, so it could never be
+    /// handed out.
+    OutsideSubnet,
+    /// The address is the server's own, the router's, or the network or
+    /// broadcast address of the subnet.
+    ReservedAddress,
 }
 
 /// Pre-allocated UDP socket buffers and metadata for the DHCP server.
@@ -544,12 +645,13 @@ pub enum TransactionEvent {
 
 /// DHCP message kinds reported to an admission policy.
 ///
-/// Returning `false` for [`Discover`](Self::Discover) or [`Request`](Self::Request) silently
-/// suppresses the corresponding response. A client's MAC address is not an authentication
-/// mechanism and can be spoofed, so admission policies should not be treated as a security
-/// boundary.
+/// Returning `false` for [`Discover`](Self::Discover), [`Request`](Self::Request) or
+/// [`Inform`](Self::Inform) silently suppresses the corresponding response. A client's MAC
+/// address is not an authentication mechanism and can be spoofed, so admission policies should
+/// not be treated as a security boundary.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum AdmissionEvent {
     /// Client is asking for an offer.
     Discover,
@@ -560,12 +662,41 @@ pub enum AdmissionEvent {
     /// Releases are always processed; the policy's return value is ignored. Completed releases
     /// are also reported through [`TransactionEvent::Released`].
     Release,
+    /// Client already has an address and asks only for configuration (`DHCPINFORM`).
+    Inform,
 }
 
 /// An action produced by processing a received DHCP packet.
 struct PacketAction {
-    response: Option<Vec<u8, DHCP_PACKET_SIZE>>,
-    event: Option<TransactionEvent>,
+    response: Option<(Vec<u8, DHCP_PACKET_SIZE>, (Ipv4Addr, u16))>,
+    /// A completed transaction and the lease it concerns.
+    event: Option<(TransactionEvent, Lease)>,
+}
+
+impl PacketAction {
+    const fn silent() -> Self {
+        Self {
+            response: None,
+            event: None,
+        }
+    }
+}
+
+/// The fields of a client message the server acts on.
+struct ClientMessage {
+    packet: DhcpPacket,
+    msg_type: u8,
+    mac: [u8; 6],
+    ciaddr: Option<Ipv4Addr>,
+    giaddr: Option<Ipv4Addr>,
+    requested_ip: Option<Ipv4Addr>,
+    server_id: Option<Ipv4Addr>,
+}
+
+/// `None` for the unspecified address `0.0.0.0`.
+fn non_zero(octets: [u8; 4]) -> Option<Ipv4Addr> {
+    let ip = Ipv4Addr::from(octets);
+    (!ip.is_unspecified()).then_some(ip)
 }
 
 /// Wrapper around the Embassy UDP socket for DHCP server use.
@@ -608,8 +739,10 @@ impl<'a> DHCPServerSocket<'a> {
 ///
 /// # Type Parameters
 ///
-/// - `MAX_CLIENTS`: Maximum number of concurrent leases (compile-time fixed)
+/// - `MAX_CLIENTS`: Maximum number of concurrent leases (compile-time fixed). It must be a power
+///   of two, as required by the underlying `heapless::FnvIndexMap`.
 /// - `MAX_DNS`: Maximum number of DNS servers in configuration
+/// - `MAX_STATIC`: Maximum number of static leases (fixed MAC to IP assignments)
 ///
 /// # Examples
 ///
@@ -646,12 +779,18 @@ impl<'a> DHCPServerSocket<'a> {
 pub struct DhcpServer<
     const MAX_CLIENTS: usize = DEFAULT_MAX_CLIENTS,
     const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS,
+    const MAX_STATIC: usize = DEFAULT_MAX_STATIC,
 > {
     config: DhcpConfig<MAX_DNS>,
     leases: FnvIndexMap<[u8; 6], LeaseEntry, MAX_CLIENTS>,
+    static_leases: Vec<([u8; 6], Ipv4Addr), MAX_STATIC>,
+    /// Addresses a client reported as in use, with when they become usable again.
+    declined: Vec<(Ipv4Addr, u64), MAX_DECLINED>,
 }
 
-impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX_DNS> {
+impl<const MAX_CLIENTS: usize, const MAX_DNS: usize, const MAX_STATIC: usize>
+    DhcpServer<MAX_CLIENTS, MAX_DNS, MAX_STATIC>
+{
     /// Creates a new DHCP server with a single DNS server.
     ///
     /// For multiple DNS servers or advanced options, use
@@ -693,13 +832,13 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
             lease_time: DEFAULT_LEASE_TIME,
             domain_name: None,
         };
-        Self {
-            config,
-            leases: FnvIndexMap::new(),
-        }
+        Self::with_config(config)
     }
 
     /// Creates a new DHCP server from a [`DhcpConfig`].
+    ///
+    /// The configuration is used as is; see [`DhcpConfig::validate`] to check
+    /// it first.
     ///
     /// # Examples
     ///
@@ -723,6 +862,8 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         Self {
             config,
             leases: FnvIndexMap::new(),
+            static_leases: Vec::new(),
+            declined: Vec::new(),
         }
     }
 
@@ -732,15 +873,103 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         &self.config
     }
 
-    /// Gets the current number of active leases.
+    /// Gets the current number of active leases, including addresses reserved
+    /// for outstanding offers.
     #[must_use]
     pub fn lease_count(&self) -> usize {
         self.leases.len()
     }
 
+    /// Iterates over the current leases and offer reservations.
+    ///
+    /// Entries that expired since the last packet are still listed until
+    /// [`purge_expired_leases`](Self::purge_expired_leases) runs.
+    pub fn leases(&self) -> impl Iterator<Item = Lease> + '_ {
+        self.leases.values().copied().map(LeaseEntry::to_lease)
+    }
+
+    /// The lease or offer reservation of the client with `mac`, if any.
+    #[must_use]
+    pub fn lease_for(&self, mac: [u8; 6]) -> Option<Lease> {
+        self.leases.get(&mac).copied().map(LeaseEntry::to_lease)
+    }
+
+    /// The server's own subnet, from the configuration.
+    const fn main_subnet(&self) -> Subnet {
+        let mask = self.config.subnet_mask.to_bits();
+        Subnet {
+            network: self.config.server_ip.to_bits() & mask,
+            mask,
+            router: self.config.router,
+            start: self.config.ip_pool_start.to_bits(),
+            end: self.config.ip_pool_end.to_bits(),
+        }
+    }
+
+    /// The subnet to serve a request from: ours, for a request sent directly
+    /// or through a relay on our subnet. `None` for a relay on another subnet.
+    fn subnet_for(&self, giaddr: Option<Ipv4Addr>) -> Option<Subnet> {
+        let main = self.main_subnet();
+        giaddr
+            .is_none_or(|relay| main.contains(relay))
+            .then_some(main)
+    }
+
+    /// The subnet `ip` belongs to, if any.
+    fn subnet_of(&self, ip: Ipv4Addr) -> Option<Subnet> {
+        Some(self.main_subnet()).filter(|subnet| subnet.contains(ip))
+    }
+
+    /// Forgets the lease of the client with `mac`, returning its address.
+    ///
+    /// The client is not told; it keeps using the address until its lease
+    /// would have expired or it next renews (and is refused).
+    pub fn revoke(&mut self, mac: [u8; 6]) -> Option<Ipv4Addr> {
+        self.leases.remove(&mac).map(|entry| entry.ip)
+    }
+
+    /// Always assigns `ip` to the client with `mac`.
+    ///
+    /// The address does not have to be inside the dynamic pool, but it must be
+    /// on the server's subnet. It is never handed out to another client.
+    /// Adding a static lease for a MAC that already has one replaces it.
+    ///
+    /// # Errors
+    ///
+    /// See [`StaticLeaseError`].
+    pub fn add_static_lease(&mut self, mac: [u8; 6], ip: Ipv4Addr) -> Result<(), StaticLeaseError> {
+        let subnet = self.subnet_of(ip).ok_or(StaticLeaseError::OutsideSubnet)?;
+        if self.is_reserved_address(ip, &subnet) {
+            return Err(StaticLeaseError::ReservedAddress);
+        }
+        if self
+            .static_leases
+            .iter()
+            .any(|(other, static_ip)| *static_ip == ip && *other != mac)
+        {
+            return Err(StaticLeaseError::AddressTaken);
+        }
+        if let Some(slot) = self.static_leases.iter_mut().find(|(m, _)| *m == mac) {
+            slot.1 = ip;
+            return Ok(());
+        }
+        self.static_leases
+            .push((mac, ip))
+            .map_err(|_| StaticLeaseError::Full)
+    }
+
+    /// Removes the static lease of `mac`, returning its address.
+    pub fn remove_static_lease(&mut self, mac: [u8; 6]) -> Option<Ipv4Addr> {
+        let index = self.static_leases.iter().position(|(m, _)| *m == mac)?;
+        Some(self.static_leases.swap_remove(index).1)
+    }
+
     /// Removes all expired leases from the lease table.
     pub fn purge_expired_leases(&mut self) {
-        let now = embassy_time::Instant::now().as_millis();
+        self.purge_expired_at(embassy_time::Instant::now().as_millis());
+    }
+
+    fn purge_expired_at(&mut self, now: u64) {
         let mut expired: Vec<[u8; 6], MAX_CLIENTS> = Vec::new();
         for (mac, entry) in &self.leases {
             if entry.expires_at <= now {
@@ -750,20 +979,23 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         for mac in &expired {
             self.leases.remove(mac);
         }
+        self.declined.retain(|(_, until)| *until > now);
     }
 
-    /// Checks if the IP pool is full.
+    /// Checks if the main IP pool (of [`DhcpConfig`]) is full.
     ///
     /// Call [`purge_expired_leases`](Self::purge_expired_leases) first
     /// to reclaim expired entries if desired.
     #[must_use]
     pub fn is_pool_full(&self) -> bool {
-        let pool_size =
-            u32::from(self.config.ip_pool_end) - u32::from(self.config.ip_pool_start) + 1;
-        self.leases.len() >= (pool_size as usize).min(MAX_CLIENTS)
+        self.leases.len() >= MAX_CLIENTS || self.get_next_available_ip().is_none()
     }
 
     /// Finds the next available IP address in the configured pool.
+    ///
+    /// The server's own address, the router, the network and broadcast
+    /// addresses of the subnet, addresses held by leases, static leases and
+    /// recently declined addresses are skipped.
     ///
     /// # Example
     ///
@@ -787,110 +1019,155 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     /// let next = server.get_next_available_ip();
     /// assert!(matches!(next, Some(ip) if ip == Ipv4Addr::new(10, 0, 0, 100)));
     /// ```
+    #[must_use]
     pub fn get_next_available_ip(&self) -> Option<Ipv4Addr> {
-        let start = u32::from(self.config.ip_pool_start);
-        let end = u32::from(self.config.ip_pool_end);
-        (start..=end)
+        let subnet = self.main_subnet();
+        // An inverted pool is empty, not a panic.
+        (subnet.start..=subnet.end)
             .map(Ipv4Addr::from)
-            .find(|ip| !self.leases.values().any(|lease| lease.ip == *ip))
+            .find(|ip| self.is_assignable(*ip, None, &subnet))
     }
 
-    /// Appends standard DHCP options to a response packet.
-    fn add_options(&self, packet: &mut Vec<u8, DHCP_PACKET_SIZE>, msg_type: u8) {
-        packet
-            .extend_from_slice(&[options::MESSAGE_TYPE, 1, msg_type])
-            .ok();
-        packet.extend_from_slice(&[options::SERVER_ID, 4]).ok();
-        packet
-            .extend_from_slice(&self.config.server_ip.octets())
-            .ok();
-        packet.extend_from_slice(&[options::SUBNET_MASK, 4]).ok();
-        packet
-            .extend_from_slice(&self.config.subnet_mask.octets())
-            .ok();
+    /// The server, the subnet's router, and the subnet's network and
+    /// broadcast addresses are never handed out.
+    fn is_reserved_address(&self, ip: Ipv4Addr, subnet: &Subnet) -> bool {
+        ip == self.config.server_ip
+            || Some(ip) == subnet.router
+            || ip.is_unspecified()
+            || subnet.is_network_or_broadcast(ip)
+    }
 
-        if let Some(router) = self.config.router {
-            packet.extend_from_slice(&[options::ROUTER, 4]).ok();
-            packet.extend_from_slice(&router.octets()).ok();
+    /// Whether `ip` may be given to the client `mac` from the dynamic pool of
+    /// `subnet` (`None`: to any new client).
+    fn is_assignable(&self, ip: Ipv4Addr, mac: Option<[u8; 6]>, subnet: &Subnet) -> bool {
+        subnet.in_pool(ip)
+            && !self.is_reserved_address(ip, subnet)
+            && !self.declined.iter().any(|(declined, _)| *declined == ip)
+            && self
+                .leases
+                .values()
+                .all(|lease| lease.ip != ip || Some(lease.mac) == mac)
+            && self
+                .static_leases
+                .iter()
+                .all(|(static_mac, static_ip)| *static_ip != ip || Some(*static_mac) == mac)
+    }
+
+    /// The static address of `mac` on `subnet`, unless another client
+    /// currently holds it.
+    fn static_ip_for(&self, mac: [u8; 6], subnet: &Subnet) -> Option<Ipv4Addr> {
+        let (_, ip) = self
+            .static_leases
+            .iter()
+            .find(|(m, ip)| *m == mac && subnet.contains(*ip))?;
+        self.leases
+            .values()
+            .all(|lease| lease.ip != *ip || lease.mac == mac)
+            .then_some(*ip)
+    }
+
+    /// Choose the address to offer `mac` on `subnet` (RFC 2131 section
+    /// 4.3.1): its static lease, its current binding, the address it asked
+    /// for, or the next free one.
+    fn address_for(
+        &self,
+        mac: [u8; 6],
+        requested: Option<Ipv4Addr>,
+        subnet: &Subnet,
+    ) -> Option<Ipv4Addr> {
+        if let Some(ip) = self.static_ip_for(mac, subnet) {
+            return Some(ip);
         }
-
-        if !self.config.dns_servers.is_empty() {
-            let dns_len = self.config.dns_servers.len() * 4;
-            let dns_len_u8 = u8::try_from(dns_len).unwrap_or_default();
-            packet
-                .extend_from_slice(&[options::DNS_SERVER, dns_len_u8])
-                .ok();
-            for dns in &self.config.dns_servers {
-                packet.extend_from_slice(&dns.octets()).ok();
-            }
-        }
-
-        packet.extend_from_slice(&[options::LEASE_TIME, 4]).ok();
-        packet
-            .extend_from_slice(&self.config.lease_time.to_be_bytes())
-            .ok();
-        if let Some(domain) = self.config.domain_name
-            && let Ok(len) = u8::try_from(domain.len())
-            && packet.len() + 2 + domain.len() < packet.capacity()
+        if let Some(lease) = self.leases.get(&mac)
+            && self.is_assignable(lease.ip, Some(mac), subnet)
         {
-            packet.extend_from_slice(&[options::DOMAIN_NAME, len]).ok();
-            packet.extend_from_slice(domain.as_bytes()).ok();
+            return Some(lease.ip);
         }
-        packet.extend_from_slice(&[options::END]).ok();
+        if let Some(ip) = requested
+            && self.is_assignable(ip, Some(mac), subnet)
+        {
+            return Some(ip);
+        }
+        (subnet.start..=subnet.end)
+            .map(Ipv4Addr::from)
+            .find(|ip| self.is_assignable(*ip, Some(mac), subnet))
     }
 
-    /// Creates a DHCP response packet.
-    fn make_response(&mut self, req: &DhcpPacket, msg_type: u8) -> Vec<u8, DHCP_PACKET_SIZE> {
-        let mut resp = DhcpPacket {
-            op: 2, // BOOTREPLY
-            xid: req.xid,
-            htype: 1,
-            hlen: 6,
-            magic: DHCP_MAGIC,
-            ..Default::default()
-        };
-        resp.chaddr[..6].copy_from_slice(&req.chaddr[..6]);
-        let mac = req.chaddr[..6].try_into().unwrap_or([0; 6]);
+    /// Whether `mac` may be bound to `ip` on `subnet` now (for a
+    /// `DHCPREQUEST`).
+    fn may_bind(&self, mac: [u8; 6], ip: Ipv4Addr, subnet: &Subnet) -> bool {
+        if !subnet.contains(ip) {
+            return false;
+        }
+        if self
+            .static_leases
+            .iter()
+            .any(|(m, static_ip)| *m == mac && subnet.contains(*static_ip))
+        {
+            return self.static_ip_for(mac, subnet) == Some(ip);
+        }
+        // No record, for example after the server restarted: accept the
+        // address if it is free, so clients keep their addresses.
+        self.leases.get(&mac).map_or_else(
+            || self.is_assignable(ip, Some(mac), subnet),
+            |lease| lease.ip == ip && !self.declined.iter().any(|(d, _)| *d == ip),
+        )
+    }
 
-        match msg_type {
-            DHCP_OFFER => {
-                if let Some(ip) = self.get_next_available_ip() {
-                    resp.yiaddr = ip.octets();
-                    // Reserve with a short TTL to prevent duplicate offers.
-                    let reservation = LeaseEntry {
-                        ip,
-                        mac,
-                        expires_at: embassy_time::Instant::now().as_millis() + OFFER_RESERVATION_MS,
-                    };
-                    let _ = self.leases.insert(mac, reservation);
-                }
-            }
-            DHCP_ACK => {
-                if let Some(lease) = self.leases.get(&mac) {
-                    resp.yiaddr = lease.ip.octets();
-                } else if let Some(ip) = self.get_next_available_ip() {
-                    resp.yiaddr = ip.octets();
-                }
-                // (Re-)insert with the full lease duration.
-                let ip = Ipv4Addr::from(resp.yiaddr);
-                let lease = LeaseEntry {
-                    ip,
-                    mac,
-                    expires_at: embassy_time::Instant::now().as_millis()
-                        + (u64::from(self.config.lease_time) * 1000),
-                };
-                let _ = self.leases.insert(mac, lease);
-            }
-            _ => {}
+    /// Store a lease, returning `false` if the table is full.
+    fn record(
+        &mut self,
+        mac: [u8; 6],
+        ip: Ipv4Addr,
+        expires_at: u64,
+        bound: bool,
+    ) -> Option<Lease> {
+        let entry = LeaseEntry {
+            ip,
+            mac,
+            expires_at,
+            bound,
+        };
+        self.leases.insert(mac, entry).ok()?;
+        Some(entry.to_lease())
+    }
+
+    fn lease_expiry(&self, now: u64) -> u64 {
+        if self.config.lease_time == u32::MAX {
+            u64::MAX
+        } else {
+            now.saturating_add(u64::from(self.config.lease_time) * 1000)
+        }
+    }
+
+    /// Parse and sanity-check a datagram received on the server port.
+    fn parse_client_message(data: &[u8]) -> Option<ClientMessage> {
+        if data.len() < FIXED_PART_SIZE {
+            return None;
+        }
+        // SAFETY: read_unaligned handles the packed struct without alignment requirements.
+        // We verified data.len() >= FIXED_PART_SIZE above.
+        let packet = unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<DhcpPacket>()) };
+        if packet.magic != DHCP_MAGIC
+            || packet.op != BOOTREQUEST
+            || packet.htype != HTYPE_ETHERNET
+            || packet.hlen != HLEN_ETHERNET
+        {
+            return None;
         }
 
-        let mut bytes = Vec::<u8, DHCP_PACKET_SIZE>::new();
-        // Safe serialization of a packed struct: transmute to a byte array
-        // avoids alignment issues that from_raw_parts would have.
-        let resp_bytes: [u8; FIXED_PART_SIZE] = unsafe { core::mem::transmute(resp) };
-        bytes.extend_from_slice(&resp_bytes).ok();
-        self.add_options(&mut bytes, msg_type);
-        bytes
+        let options = &data[FIXED_PART_SIZE..];
+        let mut mac = [0; 6];
+        mac.copy_from_slice(&packet.chaddr[..6]);
+        Some(ClientMessage {
+            packet,
+            msg_type: options::message_type(options)?,
+            mac,
+            ciaddr: non_zero(packet.ciaddr),
+            giaddr: non_zero(packet.giaddr),
+            requested_ip: options::find_ipv4(options, options::REQUESTED_IP),
+            server_id: options::find_ipv4(options, options::SERVER_ID),
+        })
     }
 
     /// Validates and processes an incoming DHCP packet before any response is sent.
@@ -898,65 +1175,286 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         &mut self,
         data: &[u8],
         allow_client: &mut P,
-    ) -> Option<PacketAction>
+        now: u64,
+    ) -> PacketAction
     where
         P: FnMut([u8; 6], AdmissionEvent) -> bool,
     {
         // Reclaim expired leases before processing.
-        self.purge_expired_leases();
+        self.purge_expired_at(now);
 
-        if data.len() < FIXED_PART_SIZE {
-            return None;
-        }
+        let Some(message) = Self::parse_client_message(data) else {
+            return PacketAction::silent();
+        };
+        let mac = message.mac;
+        // Messages that name another server are none of our business.
+        let for_us = message
+            .server_id
+            .is_none_or(|id| id == self.config.server_ip);
 
-        // SAFETY: read_unaligned handles the packed struct without alignment requirements.
-        // We verified data.len() >= FIXED_PART_SIZE above.
-        let packet = unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<DhcpPacket>()) };
-        if packet.magic != DHCP_MAGIC {
-            return None;
-        }
-
-        let options = &data[FIXED_PART_SIZE..];
-        let msg_type = options::message_type(options)?;
-        let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
-
-        match msg_type {
+        match message.msg_type {
             DHCP_DISCOVER => {
+                let Some(subnet) = self.subnet_for(message.giaddr) else {
+                    return PacketAction::silent();
+                };
                 if !allow_client(mac, AdmissionEvent::Discover) {
-                    return None;
+                    return PacketAction::silent();
                 }
-                Some(PacketAction {
-                    response: Some(self.make_response(&packet, DHCP_OFFER)),
-                    event: None,
-                })
+                self.offer(&message, &subnet, now)
             }
             DHCP_REQUEST => {
-                if !allow_client(mac, AdmissionEvent::Request) {
-                    return None;
+                if !for_us {
+                    // The client chose another server's offer: free ours.
+                    if self.leases.get(&mac).is_some_and(|lease| !lease.bound) {
+                        self.leases.remove(&mac);
+                    }
+                    return PacketAction::silent();
                 }
-                let resp = self.make_response(&packet, DHCP_ACK);
-                let event = self
-                    .leases
-                    .get(&mac)
-                    .map(|entry| TransactionEvent::Leased(entry.ip, mac));
-                Some(PacketAction {
-                    response: Some(resp),
-                    event,
-                })
+                let Some(subnet) = self.subnet_for(message.giaddr) else {
+                    return PacketAction::silent();
+                };
+                if !allow_client(mac, AdmissionEvent::Request) {
+                    return PacketAction::silent();
+                }
+                self.acknowledge(&message, &subnet, now)
+            }
+            DHCP_DECLINE => {
+                if for_us && let Some(ip) = message.requested_ip {
+                    if self.leases.get(&mac).is_some_and(|lease| lease.ip == ip) {
+                        self.leases.remove(&mac);
+                    }
+                    self.hold_declined(ip, now);
+                }
+                PacketAction::silent()
             }
             DHCP_RELEASE => {
+                if !for_us {
+                    return PacketAction::silent();
+                }
                 let _ = allow_client(mac, AdmissionEvent::Release);
-                let event = self
+                let matches = self
                     .leases
-                    .remove(&mac)
-                    .map(|entry| TransactionEvent::Released(entry.ip, entry.mac));
-                Some(PacketAction {
+                    .get(&mac)
+                    .is_some_and(|lease| message.ciaddr.is_none_or(|ip| ip == lease.ip));
+                let event = if matches {
+                    self.leases.remove(&mac).map(|entry| {
+                        (
+                            TransactionEvent::Released(entry.ip, entry.mac),
+                            entry.to_lease(),
+                        )
+                    })
+                } else {
+                    None
+                };
+                PacketAction {
                     response: None,
                     event,
-                })
+                }
             }
-            _ => None,
+            DHCP_INFORM => {
+                let Some(subnet) = self.subnet_for(message.giaddr) else {
+                    return PacketAction::silent();
+                };
+                if !allow_client(mac, AdmissionEvent::Inform) {
+                    return PacketAction::silent();
+                }
+                PacketAction {
+                    response: Some(self.reply(&message, DHCP_ACK, None, &subnet)),
+                    event: None,
+                }
+            }
+            _ => PacketAction::silent(),
         }
+    }
+
+    /// Answer a `DHCPDISCOVER` with an offer, reserving the address briefly.
+    fn offer(&mut self, message: &ClientMessage, subnet: &Subnet, now: u64) -> PacketAction {
+        let mac = message.mac;
+        let Some(ip) = self.address_for(mac, message.requested_ip, subnet) else {
+            // Nothing to offer: stay silent rather than offer 0.0.0.0.
+            return PacketAction::silent();
+        };
+        // A client that is already bound to this address keeps its full lease.
+        let already_bound = self
+            .leases
+            .get(&mac)
+            .is_some_and(|lease| lease.bound && lease.ip == ip);
+        let reserved = if already_bound {
+            true
+        } else {
+            self.record(mac, ip, now + OFFER_RESERVATION_MS, false)
+                .is_some()
+        };
+        if !reserved {
+            // The lease table is full; an unrecorded offer could be made twice.
+            return PacketAction::silent();
+        }
+        PacketAction {
+            response: Some(self.reply(message, DHCP_OFFER, Some(ip), subnet)),
+            event: None,
+        }
+    }
+
+    /// Answer a `DHCPREQUEST` addressed to us with an ACK or a NAK
+    /// (RFC 2131 section 4.3.2).
+    fn acknowledge(&mut self, message: &ClientMessage, subnet: &Subnet, now: u64) -> PacketAction {
+        let mac = message.mac;
+        let target = if message.server_id.is_some() {
+            // SELECTING: the requested address must be present.
+            message.requested_ip
+        } else {
+            // INIT-REBOOT names the address in option 50; RENEWING and
+            // REBINDING put it in ciaddr.
+            message.requested_ip.or(message.ciaddr)
+        };
+        let Some(ip) = target else {
+            return if message.server_id.is_some() {
+                self.nak(message)
+            } else {
+                PacketAction::silent()
+            };
+        };
+
+        let lease = if self.may_bind(mac, ip, subnet) {
+            self.record(mac, ip, self.lease_expiry(now), true)
+        } else {
+            None
+        };
+        // Wrong address, address taken, or no room to record the lease: NAK.
+        lease.map_or_else(
+            || self.nak(message),
+            |lease| PacketAction {
+                response: Some(self.reply(message, DHCP_ACK, Some(ip), subnet)),
+                event: Some((TransactionEvent::Leased(ip, mac), lease)),
+            },
+        )
+    }
+
+    fn nak(&self, message: &ClientMessage) -> PacketAction {
+        PacketAction {
+            response: Some(self.reply(message, DHCP_NAK, None, &self.main_subnet())),
+            event: None,
+        }
+    }
+
+    /// Remember a declined address so it is not offered for a while.
+    fn hold_declined(&mut self, ip: Ipv4Addr, now: u64) {
+        self.declined.retain(|(declined, _)| *declined != ip);
+        if self.declined.is_full() {
+            // Forget the address that becomes usable soonest.
+            if let Some(index) = self
+                .declined
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, until))| *until)
+                .map(|(index, _)| index)
+            {
+                self.declined.swap_remove(index);
+            }
+        }
+        let _ = self.declined.push((ip, now + DECLINE_HOLD_MS));
+    }
+
+    /// Where a reply goes (RFC 2131 section 4.1): to the relay agent if the
+    /// request came through one, to the client's own address if it has one,
+    /// otherwise broadcast.
+    const fn destination(message: &ClientMessage, msg_type: u8) -> (Ipv4Addr, u16) {
+        match (message.giaddr, message.ciaddr) {
+            (Some(relay), _) => (relay, DHCP_SERVER_PORT),
+            (None, Some(ciaddr)) if msg_type != DHCP_NAK => (ciaddr, DHCP_CLIENT_PORT),
+            _ => (Ipv4Addr::BROADCAST, DHCP_CLIENT_PORT),
+        }
+    }
+
+    /// Build a reply of `msg_type` to `message`, assigning `yiaddr`.
+    fn reply(
+        &self,
+        message: &ClientMessage,
+        msg_type: u8,
+        yiaddr: Option<Ipv4Addr>,
+        subnet: &Subnet,
+    ) -> (Vec<u8, DHCP_PACKET_SIZE>, (Ipv4Addr, u16)) {
+        let request = &message.packet;
+        let mut flags = u16::from_be(request.flags);
+        if msg_type == DHCP_NAK && message.giaddr.is_some() {
+            // A relay must broadcast a NAK: the client's address is unusable.
+            flags |= BROADCAST_FLAG;
+        }
+        let mut resp = DhcpPacket {
+            op: BOOTREPLY,
+            htype: HTYPE_ETHERNET,
+            hlen: HLEN_ETHERNET,
+            xid: request.xid,
+            flags: flags.to_be(),
+            giaddr: request.giaddr,
+            magic: DHCP_MAGIC,
+            ..Default::default()
+        };
+        if msg_type == DHCP_ACK {
+            resp.ciaddr = request.ciaddr;
+        }
+        resp.yiaddr = yiaddr.unwrap_or(Ipv4Addr::UNSPECIFIED).octets();
+        resp.chaddr = request.chaddr;
+
+        let mut bytes = Vec::<u8, DHCP_PACKET_SIZE>::new();
+        // Safe serialization of a packed struct: transmute to a byte array
+        // avoids alignment issues that from_raw_parts would have.
+        let resp_bytes: [u8; FIXED_PART_SIZE] = unsafe { core::mem::transmute(resp) };
+        bytes.extend_from_slice(&resp_bytes).ok();
+        self.add_options(&mut bytes, msg_type, yiaddr.is_some(), subnet);
+        (bytes, Self::destination(message, msg_type))
+    }
+
+    /// Appends the options of a reply. `assigns` is `false` for a NAK and for
+    /// the ACK to a `DHCPINFORM`, which carry no lease.
+    fn add_options(
+        &self,
+        packet: &mut Vec<u8, DHCP_PACKET_SIZE>,
+        msg_type: u8,
+        assigns: bool,
+        subnet: &Subnet,
+    ) {
+        // Each option is written whole or not at all, with room kept for END.
+        let mut push = |code: u8, value: &[u8]| {
+            let Ok(len) = u8::try_from(value.len()) else {
+                return;
+            };
+            if packet.len() + 2 + value.len() < packet.capacity() {
+                let _ = packet.extend_from_slice(&[code, len]);
+                let _ = packet.extend_from_slice(value);
+            }
+        };
+
+        push(options::MESSAGE_TYPE, &[msg_type]);
+        push(options::SERVER_ID, &self.config.server_ip.octets());
+        if msg_type != DHCP_NAK {
+            if assigns {
+                let lease = self.config.lease_time;
+                push(options::LEASE_TIME, &lease.to_be_bytes());
+                if lease != u32::MAX {
+                    // T1 at 50% and T2 at 87.5% of the lease (RFC 2131 section 4.4.5).
+                    push(options::RENEWAL_TIME, &(lease / 2).to_be_bytes());
+                    push(options::REBINDING_TIME, &(lease - lease / 8).to_be_bytes());
+                }
+            }
+            push(options::SUBNET_MASK, &subnet.mask.to_be_bytes());
+            if let Some(router) = subnet.router {
+                push(options::ROUTER, &router.octets());
+            }
+            push(options::BROADCAST_ADDRESS, &subnet.broadcast().octets());
+            if !self.config.dns_servers.is_empty() {
+                // An option holds at most 255 bytes: 63 addresses.
+                let mut dns = Vec::<u8, 252>::new();
+                for server in self.config.dns_servers.iter().take(63) {
+                    let _ = dns.extend_from_slice(&server.octets());
+                }
+                push(options::DNS_SERVER, &dns);
+            }
+            if let Some(domain) = self.config.domain_name {
+                push(options::DOMAIN_NAME, domain.as_bytes());
+            }
+        }
+        let _ = packet.push(options::END);
     }
 
     /// Handles an incoming DHCP packet.
@@ -966,13 +1464,16 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         socket: &DHCPServerSocket<'_>,
         data: &[u8],
         allow_client: &mut P,
-    ) -> Option<TransactionEvent>
+    ) -> Option<(TransactionEvent, Lease)>
     where
         P: FnMut([u8; 6], AdmissionEvent) -> bool,
     {
-        let action = self.prepare_packet_with_filter(data, allow_client)?;
-        if let Some(resp) = action.response {
-            let endpoint = (Ipv4Addr::BROADCAST, DHCP_CLIENT_PORT);
+        let action = self.prepare_packet_with_filter(
+            data,
+            allow_client,
+            embassy_time::Instant::now().as_millis(),
+        );
+        if let Some((resp, endpoint)) = action.response {
             let _ = socket.socket.send_to(&resp, endpoint).await;
         }
         action.event
@@ -1032,18 +1533,15 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         P: FnMut([u8; 6], AdmissionEvent) -> bool,
     {
         loop {
-            let mut buf = [0u8; DHCP_PACKET_SIZE];
-            match socket.socket.recv_from(&mut buf).await {
-                Ok((len, _)) => {
-                    if let Some(event) = self
-                        .handle_packet_with_filter(socket, &buf[..len], &mut allow_client)
-                        .await
-                    {
-                        socket.socket.flush().await;
-                        return Ok(event);
-                    }
-                }
-                Err(e) => return Err(e),
+            // As large as the socket buffer, so no datagram is ever truncated.
+            let mut buf = [0u8; SOCKET_BUFFER_SIZE];
+            let (len, _) = socket.socket.recv_from(&mut buf).await?;
+            let event = self
+                .handle_packet_with_filter(socket, &buf[..len], &mut allow_client)
+                .await;
+            socket.socket.flush().await;
+            if let Some((event, _)) = event {
+                return Ok(event);
             }
         }
     }
@@ -1142,10 +1640,10 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         let mut buffers = DHCPServerBuffers::new();
         let mut socket = DHCPServerSocket::new(stack, &mut buffers);
         loop {
-            let mut buf = [0u8; DHCP_PACKET_SIZE];
+            let mut buf = [0u8; SOCKET_BUFFER_SIZE];
             match socket.socket.recv_from(&mut buf).await {
                 Ok((len, _)) => {
-                    if let Some(event) = self
+                    if let Some((event, _)) = self
                         .handle_packet_with_filter(&socket, &buf[..len], &mut allow_client)
                         .await
                     {
