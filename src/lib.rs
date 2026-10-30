@@ -1679,7 +1679,10 @@ impl<
     }
 
     /// Handles an incoming DHCP packet.
-    #[allow(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn handle_packet_with_filter<P>(
         &mut self,
         socket: &DHCPServerSocket<'_>,
@@ -1728,7 +1731,10 @@ impl<
     /// # Ok(())
     /// # }
     /// ```
-    #[allow(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn lease_one(
         &mut self,
         socket: &mut DHCPServerSocket<'_>,
@@ -1745,7 +1751,10 @@ impl<
     /// # Errors
     ///
     /// Returns [`RecvError`] if there was an error receiving a packet.
-    #[allow(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn lease_one_with_filter<P>(
         &mut self,
         socket: &mut DHCPServerSocket<'_>,
@@ -1768,7 +1777,10 @@ impl<
     /// # Errors
     ///
     /// Returns [`RecvError`] if there was an error receiving a packet.
-    #[allow(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn lease_one_with_lease<P>(
         &mut self,
         socket: &mut DHCPServerSocket<'_>,
@@ -1820,7 +1832,10 @@ impl<
     /// server.run(stack).await
     /// # }
     /// ```
-    #[allow(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn run(&mut self, stack: Stack<'_>) -> Result<Infallible, BindError> {
         self.run_with_filter_and_callback(stack, |_, _| true, |_| {})
             .await
@@ -1865,7 +1880,10 @@ impl<
     ///
     /// Returns [`BindError`] if the UDP socket cannot be bound to port 67;
     /// otherwise it never returns.
-    #[allow(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn run_with_callback<F>(
         &mut self,
         stack: Stack<'_>,
@@ -1888,7 +1906,10 @@ impl<
     ///
     /// Returns [`BindError`] if the UDP socket cannot be bound to port 67;
     /// otherwise it never returns.
-    #[allow(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn run_with_filter_and_callback<P, F>(
         &mut self,
         stack: Stack<'_>,
@@ -1932,7 +1953,10 @@ impl<
     ///
     /// Returns [`BindError`] if the UDP socket cannot be bound to port 67;
     /// otherwise it never returns.
-    #[allow(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn run_with_lease_callback<P, F>(
         &mut self,
         stack: Stack<'_>,
