@@ -126,30 +126,6 @@ fn get_next_available_ip_skips_leased() {
     );
 }
 
-#[test]
-fn parse_message_type_discover() {
-    let options = [
-        super::OPTION_MESSAGE_TYPE,
-        1,
-        super::DHCP_DISCOVER,
-        super::OPTION_END,
-    ];
-    assert_eq!(
-        TestServer::parse_message_type(&options),
-        Some(super::DHCP_DISCOVER)
-    );
-}
-
-#[test]
-fn parse_message_type_empty() {
-    assert_eq!(TestServer::parse_message_type(&[]), None);
-}
-
-#[test]
-fn parse_message_type_end_only() {
-    assert_eq!(TestServer::parse_message_type(&[super::OPTION_END]), None);
-}
-
 fn test_server() -> TestServer {
     TestServer::new(
         Ipv4Addr::new(10, 0, 0, 1),
@@ -167,8 +143,13 @@ fn dhcp_packet(msg_type: u8, mac: [u8; 6]) -> heapless::Vec<u8, { super::DHCP_PA
     let fixed: [u8; super::FIXED_PART_SIZE] = unsafe { core::mem::transmute(packet) };
     let mut data = heapless::Vec::new();
     data.extend_from_slice(&fixed).unwrap();
-    data.extend_from_slice(&[super::OPTION_MESSAGE_TYPE, 1, msg_type, super::OPTION_END])
-        .unwrap();
+    data.extend_from_slice(&[
+        super::options::MESSAGE_TYPE,
+        1,
+        msg_type,
+        super::options::END,
+    ])
+    .unwrap();
     data
 }
 
@@ -204,4 +185,21 @@ fn denied_request_produces_no_response_or_lease() {
 
     assert!(action.is_none());
     assert!(server.leases.is_empty());
+}
+
+#[test]
+fn pad_before_message_type_is_understood() {
+    let mut server = test_server();
+    let mac = [0, 1, 2, 3, 4, 5];
+    let mut data = dhcp_packet(super::DHCP_DISCOVER, mac);
+    // Insert two PAD options in front of the message type.
+    data.insert(super::FIXED_PART_SIZE, super::options::PAD)
+        .unwrap();
+    data.insert(super::FIXED_PART_SIZE, super::options::PAD)
+        .unwrap();
+
+    let action = server.prepare_packet_with_filter(&data, &mut |_, _| true);
+
+    assert!(action.is_some());
+    assert_eq!(server.leases.len(), 1);
 }

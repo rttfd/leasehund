@@ -146,6 +146,8 @@ use embassy_time::{Duration, Timer};
 use heapless::Vec;
 use heapless::index_map::FnvIndexMap;
 
+mod options;
+
 /// Reexported types from Embassy for convenience
 pub use embassy_net::udp::RecvError;
 
@@ -342,15 +344,6 @@ const DHCP_OFFER: u8 = 2;
 const DHCP_REQUEST: u8 = 3;
 const DHCP_ACK: u8 = 5;
 const DHCP_RELEASE: u8 = 7;
-
-// DHCP Options (RFC 2132)
-const OPTION_SUBNET_MASK: u8 = 1;
-const OPTION_ROUTER: u8 = 3;
-const OPTION_DNS_SERVER: u8 = 6;
-const OPTION_LEASE_TIME: u8 = 51;
-const OPTION_MESSAGE_TYPE: u8 = 53;
-const OPTION_SERVER_ID: u8 = 54;
-const OPTION_END: u8 = 255;
 
 // The standard DHCP magic cookie (0x63825363).
 // Required by RFC 2132 section 2.
@@ -717,41 +710,22 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
             .find(|ip| !self.leases.values().any(|lease| lease.ip == *ip))
     }
 
-    /// Parses the DHCP message type from the options field.
-    fn parse_message_type(options: &[u8]) -> Option<u8> {
-        let mut i = 0;
-        while i < options.len() {
-            match options[i] {
-                OPTION_END => break,
-                OPTION_MESSAGE_TYPE if i + 2 < options.len() => return Some(options[i + 2]),
-                _ => {
-                    if i + 1 < options.len() {
-                        i += options[i + 1] as usize + 2;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        None
-    }
-
     /// Appends standard DHCP options to a response packet.
     fn add_options(&self, packet: &mut Vec<u8, DHCP_PACKET_SIZE>, msg_type: u8) {
         packet
-            .extend_from_slice(&[OPTION_MESSAGE_TYPE, 1, msg_type])
+            .extend_from_slice(&[options::MESSAGE_TYPE, 1, msg_type])
             .ok();
-        packet.extend_from_slice(&[OPTION_SERVER_ID, 4]).ok();
+        packet.extend_from_slice(&[options::SERVER_ID, 4]).ok();
         packet
             .extend_from_slice(&self.config.server_ip.octets())
             .ok();
-        packet.extend_from_slice(&[OPTION_SUBNET_MASK, 4]).ok();
+        packet.extend_from_slice(&[options::SUBNET_MASK, 4]).ok();
         packet
             .extend_from_slice(&self.config.subnet_mask.octets())
             .ok();
 
         if let Some(router) = self.config.router {
-            packet.extend_from_slice(&[OPTION_ROUTER, 4]).ok();
+            packet.extend_from_slice(&[options::ROUTER, 4]).ok();
             packet.extend_from_slice(&router.octets()).ok();
         }
 
@@ -759,18 +733,18 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
             let dns_len = self.config.dns_servers.len() * 4;
             let dns_len_u8 = u8::try_from(dns_len).unwrap_or_default();
             packet
-                .extend_from_slice(&[OPTION_DNS_SERVER, dns_len_u8])
+                .extend_from_slice(&[options::DNS_SERVER, dns_len_u8])
                 .ok();
             for dns in &self.config.dns_servers {
                 packet.extend_from_slice(&dns.octets()).ok();
             }
         }
 
-        packet.extend_from_slice(&[OPTION_LEASE_TIME, 4]).ok();
+        packet.extend_from_slice(&[options::LEASE_TIME, 4]).ok();
         packet
             .extend_from_slice(&self.config.lease_time.to_be_bytes())
             .ok();
-        packet.extend_from_slice(&[OPTION_END]).ok();
+        packet.extend_from_slice(&[options::END]).ok();
     }
 
     /// Creates a DHCP response packet.
@@ -851,7 +825,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         }
 
         let options = &data[FIXED_PART_SIZE..];
-        let msg_type = Self::parse_message_type(options)?;
+        let msg_type = options::message_type(options)?;
         let mac: [u8; 6] = packet.chaddr[..6].try_into().unwrap_or([0; 6]);
 
         match msg_type {
