@@ -40,7 +40,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-leasehund = "0.7"
+leasehund = "0.8"
 ```
 
 ## Usage
@@ -337,7 +337,7 @@ datagrams on UDP port 67 with your own stack, and send each reply where it says:
 
 ```toml
 [dependencies]
-leasehund = { version = "0.7", default-features = false }
+leasehund = { version = "0.8", default-features = false }
 ```
 
 ```rust,ignore
