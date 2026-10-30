@@ -1266,16 +1266,18 @@ impl<
     }
 
     /// The static address of `mac` on `subnet`, unless another client
-    /// currently holds it.
+    /// currently holds it or it was recently declined.
     fn static_ip_for(&self, mac: [u8; 6], subnet: &Subnet) -> Option<Ipv4Addr> {
         let (_, ip) = self
             .static_leases
             .iter()
             .find(|(m, ip)| *m == mac && subnet.contains(*ip))?;
-        self.leases
+        let available = self
+            .leases
             .values()
             .all(|lease| lease.ip != *ip || lease.mac == mac)
-            .then_some(*ip)
+            && !self.declined.iter().any(|(declined, _)| declined == ip);
+        available.then_some(*ip)
     }
 
     /// Choose the address to offer `mac` on `subnet` (RFC 2131 section
@@ -1312,12 +1314,10 @@ impl<
             // For example a client that moved to another relay's subnet.
             return false;
         }
-        if self
-            .static_leases
-            .iter()
-            .any(|(m, static_ip)| *m == mac && subnet.contains(*static_ip))
-        {
-            return self.static_ip_for(mac, subnet) == Some(ip);
+        // While its static address is held by another client or declined,
+        // the client is served from the pool like any other.
+        if let Some(static_ip) = self.static_ip_for(mac, subnet) {
+            return static_ip == ip;
         }
         // No record, for example after the server restarted: accept the
         // address if it is free, so clients keep their addresses.
@@ -1331,7 +1331,7 @@ impl<
         )
     }
 
-    /// Store a lease, returning `false` if the table is full.
+    /// Store a lease, returning `None` if the table is full.
     ///
     /// A client that sent no host name this time keeps the one it sent before.
     fn record(

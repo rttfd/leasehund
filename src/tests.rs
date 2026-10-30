@@ -770,6 +770,42 @@ fn static_lease_errors_and_removal() {
     assert_eq!(server.remove_static_lease(MAC_A), None);
 }
 
+#[test]
+fn static_address_held_by_another_client_falls_back_to_the_pool() {
+    let mut server = server();
+    // B leased .100 before it became A's static address.
+    assert_eq!(lease(&mut server, MAC_B, 0), ip(100));
+    server.add_static_lease(MAC_A, ip(100)).unwrap();
+
+    // A is served from the pool meanwhile instead of being NAKed forever.
+    let address = lease(&mut server, MAC_A, 0);
+    assert_eq!(address, ip(101));
+
+    // Once B's lease is gone, A's renewal is refused so it moves to .100.
+    server.revoke(MAC_B);
+    let renew = Msg::new(DHCP_REQUEST, MAC_A).ciaddr(address);
+    let (nak, _) = process(&mut server, &renew, 10);
+    assert_eq!(nak.unwrap().msg_type(), Some(DHCP_NAK));
+    assert_eq!(lease(&mut server, MAC_A, 20), ip(100));
+}
+
+#[test]
+fn declined_static_address_is_withheld() {
+    let mut server = server();
+    server.add_static_lease(MAC_A, ip(20)).unwrap();
+    assert_eq!(lease(&mut server, MAC_A, 0), ip(20));
+    let decline = Msg::new(DHCP_DECLINE, MAC_A)
+        .server_id(SERVER)
+        .requested(ip(20));
+    process(&mut server, &decline, 10);
+
+    // The conflicting static address is not offered again during the hold.
+    assert_eq!(lease(&mut server, MAC_A, 20), ip(100));
+    let later = 10 + DECLINE_HOLD_MS;
+    let (offer, _) = process(&mut server, &Msg::new(DHCP_DISCOVER, MAC_A), later);
+    assert_eq!(offer.unwrap().yiaddr(), ip(20));
+}
+
 // ---------------------------------------------------------------- lease table API
 
 #[test]
