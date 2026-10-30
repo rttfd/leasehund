@@ -34,7 +34,7 @@
 //! use leasehund::DhcpServer;
 //! use embassy_net::Stack;
 //!
-//! # async fn example(stack: Stack<'static>) {
+//! # async fn example(stack: Stack<'static>) -> Result<core::convert::Infallible, leasehund::BindError> {
 //! let mut server = DhcpServer::<32, 4>::new(
 //!     Ipv4Addr::new(192, 168, 1, 1),    // Server IP
 //!     Ipv4Addr::new(255, 255, 255, 0),  // Subnet mask
@@ -45,7 +45,7 @@
 //! );
 //!
 //! // Run the DHCP server (this will loop forever)
-//! server.run(stack).await;
+//! server.run(stack).await
 //! # }
 //! ```
 //!
@@ -56,7 +56,7 @@
 //! use leasehund::{DhcpServer, DhcpConfigBuilder};
 //! use embassy_net::Stack;
 //!
-//! # async fn example(stack: Stack<'static>) {
+//! # async fn example(stack: Stack<'static>) -> Result<core::convert::Infallible, leasehund::BindError> {
 //! let config = DhcpConfigBuilder::<4>::new()
 //!     .server_ip(Ipv4Addr::new(10, 0, 1, 1))
 //!     .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
@@ -72,7 +72,7 @@
 //!     .build();
 //!
 //! let mut server: DhcpServer<32, 4> = DhcpServer::with_config(config);
-//! server.run(stack).await;
+//! server.run(stack).await
 //! # }
 //! ```
 //!
@@ -117,7 +117,7 @@
 //! use leasehund::{DhcpServer, DHCPServerSocket, DHCPServerBuffers, TransactionEvent, DhcpConfigBuilder};
 //! # use embassy_net::Stack;
 //!
-//! # async fn example(stack: Stack<'static>) {
+//! # async fn example(stack: Stack<'static>) -> Result<(), leasehund::BindError> {
 //! let config = DhcpConfigBuilder::<4>::new()
 //!     .server_ip(Ipv4Addr::new(10, 0, 1, 1))
 //!     .subnet_mask(Ipv4Addr::new(255, 255, 0, 0))
@@ -133,8 +133,9 @@
 //!     .build();
 //! let mut server = DhcpServer::<32, 4>::with_config(config);
 //! let mut buffers = DHCPServerBuffers::new();
-//! let mut socket = DHCPServerSocket::new(stack, &mut buffers);
+//! let mut socket = DHCPServerSocket::new(stack, &mut buffers)?;
 //! let _event: Result<TransactionEvent, _> = server.lease_one(&mut socket).await;
+//! # Ok(())
 //! # }
 //! ```
 
@@ -144,6 +145,7 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
+use core::convert::Infallible;
 use core::net::Ipv4Addr;
 use embassy_net::Stack;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
@@ -154,7 +156,7 @@ use heapless::index_map::FnvIndexMap;
 mod options;
 
 /// Reexported types from Embassy for convenience
-pub use embassy_net::udp::RecvError;
+pub use embassy_net::udp::{BindError, RecvError};
 
 /// Standard DHCP server port (RFC 2131)
 const DHCP_SERVER_PORT: u16 = 67;
@@ -846,22 +848,22 @@ pub struct DHCPServerSocket<'a> {
 impl<'a> DHCPServerSocket<'a> {
     /// Creates a new DHCP server UDP socket bound to port 67.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the socket binding fails.
+    /// Returns [`BindError`] if the socket cannot be bound to port 67.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use leasehund::{DHCPServerSocket, DHCPServerBuffers};
     /// # use embassy_net::Stack;
-    /// # fn example(stack: Stack<'static>) {
+    /// # fn example(stack: Stack<'static>) -> Result<(), leasehund::BindError> {
     /// let mut buffers = DHCPServerBuffers::new();
-    /// let socket = DHCPServerSocket::new(stack, &mut buffers);
+    /// let socket = DHCPServerSocket::new(stack, &mut buffers)?;
+    /// # Ok(())
     /// # }
     /// ```
-    #[must_use]
-    pub fn new(stack: Stack<'a>, buffers: &'a mut DHCPServerBuffers) -> Self {
+    pub fn new(stack: Stack<'a>, buffers: &'a mut DHCPServerBuffers) -> Result<Self, BindError> {
         let mut socket = UdpSocket::new(
             stack,
             &mut buffers.rx_meta,
@@ -869,8 +871,8 @@ impl<'a> DHCPServerSocket<'a> {
             &mut buffers.tx_meta,
             &mut buffers.tx_buffer,
         );
-        socket.bind(DHCP_SERVER_PORT).unwrap();
-        Self { socket }
+        socket.bind(DHCP_SERVER_PORT)?;
+        Ok(Self { socket })
     }
 }
 
@@ -1715,7 +1717,7 @@ impl<
     /// # use embassy_net::Stack;
     /// use core::net::Ipv4Addr;
     ///
-    /// # async fn example(stack: Stack<'static>) {
+    /// # async fn example(stack: Stack<'static>) -> Result<(), leasehund::BindError> {
     /// let mut server = DhcpServer::<32, 4>::new(
     ///     Ipv4Addr::new(192, 168, 1, 1),
     ///     Ipv4Addr::new(255, 255, 255, 0),
@@ -1725,8 +1727,9 @@ impl<
     ///     Ipv4Addr::new(192, 168, 1, 200),
     /// );
     /// let mut buffers = DHCPServerBuffers::new();
-    /// let mut socket = DHCPServerSocket::new(stack, &mut buffers);
+    /// let mut socket = DHCPServerSocket::new(stack, &mut buffers)?;
     /// let _event: Result<TransactionEvent, _> = server.lease_one(&mut socket).await;
+    /// # Ok(())
     /// # }
     /// ```
     #[allow(clippy::future_not_send)]
@@ -1794,9 +1797,12 @@ impl<
 
     /// Runs the DHCP server forever on the provided network stack.
     ///
-    /// # Panics
+    /// It never returns normally: the `Ok` type is uninhabited, so
+    /// `let Err(error) = server.run(stack).await;` is irrefutable.
     ///
-    /// Panics if the UDP socket cannot bind to port 67.
+    /// # Errors
+    ///
+    /// Returns [`BindError`] if the UDP socket cannot be bound to port 67.
     ///
     /// # Examples
     ///
@@ -1805,7 +1811,7 @@ impl<
     /// use leasehund::DhcpServer;
     /// use core::net::Ipv4Addr;
     ///
-    /// # async fn example(stack: Stack<'static>) {
+    /// # async fn example(stack: Stack<'static>) -> Result<core::convert::Infallible, leasehund::BindError> {
     /// let mut server = DhcpServer::<32, 4>::new(
     ///     Ipv4Addr::new(192, 168, 1, 1),
     ///     Ipv4Addr::new(255, 255, 255, 0),
@@ -1815,11 +1821,11 @@ impl<
     ///     Ipv4Addr::new(192, 168, 1, 200),
     /// );
     ///
-    /// server.run(stack).await;
+    /// server.run(stack).await
     /// # }
     /// ```
     #[allow(clippy::future_not_send)]
-    pub async fn run(&mut self, stack: Stack<'_>) -> ! {
+    pub async fn run(&mut self, stack: Stack<'_>) -> Result<Infallible, BindError> {
         self.run_with_filter_and_callback(stack, |_, _| true, |_| {})
             .await
     }
@@ -1836,7 +1842,7 @@ impl<
     /// use leasehund::{DhcpServer, TransactionEvent};
     /// use core::net::Ipv4Addr;
     ///
-    /// # async fn example(stack: Stack<'static>) {
+    /// # async fn example(stack: Stack<'static>) -> Result<core::convert::Infallible, leasehund::BindError> {
     /// let mut server = DhcpServer::<32, 4>::new(
     ///     Ipv4Addr::new(192, 168, 1, 1),
     ///     Ipv4Addr::new(255, 255, 255, 0),
@@ -1855,11 +1861,20 @@ impl<
     ///             // log or react to release
     ///         }
     ///     }
-    /// }).await;
+    /// }).await
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BindError`] if the UDP socket cannot be bound to port 67;
+    /// otherwise it never returns.
     #[allow(clippy::future_not_send)]
-    pub async fn run_with_callback<F>(&mut self, stack: Stack<'_>, callback: F) -> !
+    pub async fn run_with_callback<F>(
+        &mut self,
+        stack: Stack<'_>,
+        callback: F,
+    ) -> Result<Infallible, BindError>
     where
         F: FnMut(TransactionEvent),
     {
@@ -1872,13 +1887,18 @@ impl<
     ///
     /// Returning `false` for a discover or request silently drops that packet without sending an
     /// OFFER, ACK, or NAK. Releases are always processed even if the policy returns `false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BindError`] if the UDP socket cannot be bound to port 67;
+    /// otherwise it never returns.
     #[allow(clippy::future_not_send)]
     pub async fn run_with_filter_and_callback<P, F>(
         &mut self,
         stack: Stack<'_>,
         allow_client: P,
         mut callback: F,
-    ) -> !
+    ) -> Result<Infallible, BindError>
     where
         P: FnMut([u8; 6], AdmissionEvent) -> bool,
         F: FnMut(TransactionEvent),
@@ -1897,7 +1917,10 @@ impl<
     /// use leasehund::{DhcpServer, TransactionEvent};
     /// # use embassy_net::Stack;
     ///
-    /// # async fn example(stack: Stack<'static>, mut server: DhcpServer) {
+    /// # async fn example(
+    /// #     stack: Stack<'static>,
+    /// #     mut server: DhcpServer,
+    /// # ) -> Result<core::convert::Infallible, leasehund::BindError> {
     /// server
     ///     .run_with_lease_callback(stack, |_, _| true, |event, lease| {
     ///         if let (TransactionEvent::Leased(ip, _), Some(name)) = (event, lease.hostname) {
@@ -1905,22 +1928,27 @@ impl<
     ///             let _ = (ip, name.as_str());
     ///         }
     ///     })
-    ///     .await;
+    ///     .await
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BindError`] if the UDP socket cannot be bound to port 67;
+    /// otherwise it never returns.
     #[allow(clippy::future_not_send)]
     pub async fn run_with_lease_callback<P, F>(
         &mut self,
         stack: Stack<'_>,
         mut allow_client: P,
         mut callback: F,
-    ) -> !
+    ) -> Result<Infallible, BindError>
     where
         P: FnMut([u8; 6], AdmissionEvent) -> bool,
         F: FnMut(TransactionEvent, &Lease),
     {
         let mut buffers = DHCPServerBuffers::new();
-        let mut socket = DHCPServerSocket::new(stack, &mut buffers);
+        let mut socket = DHCPServerSocket::new(stack, &mut buffers)?;
         loop {
             let mut buf = [0u8; SOCKET_BUFFER_SIZE];
             match socket.socket.recv_from(&mut buf).await {
