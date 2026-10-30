@@ -10,12 +10,13 @@ A lightweight, embedded-friendly DHCP server implementation for Rust `no_std` en
 
 ## Overview
 
-Leasehund provides a minimal DHCP server implementation designed for embedded systems and resource-constrained environments. Built on top of the Embassy async runtime, it supports the core DHCP functionality needed for automatic IP address assignment in local networks.
+Leasehund provides a minimal DHCP server implementation designed for embedded systems and resource-constrained environments. It supports the core DHCP functionality needed for automatic IP address assignment in local networks. The server core is transport-free; an Embassy adapter (the default `embassy` feature) runs it on an Embassy network stack, and any other UDP stack can drive it through `handle_packet()`.
 
 ## Features
 
 - **No-std compatible**: Designed for embedded systems without heap allocation
-- **Embassy integration**: Built on top of Embassy async runtime and networking stack
+- **Transport-free core**: `DhcpServer::handle_packet()` turns a received datagram into a reply without any I/O
+- **Embassy adapter**: `run()` and `lease_one()` drive the core over an Embassy socket (default `embassy` feature)
 - **Configurable IP pools**: Define custom IP address ranges for client assignment
 - **Lease expiry**: Expired leases are automatically reclaimed before each allocation
 - **IP reservation**: Offered IPs are reserved to prevent duplicate offers
@@ -66,8 +67,9 @@ async fn main(_spawner: Spawner) {
         Ipv4Addr::new(192, 168, 1, 200),  // IP pool end
     );
 
-    // Run the DHCP server (this will loop forever)
-    server.run(stack).await;
+    // Runs forever; it only returns if UDP port 67 cannot be bound.
+    let Err(error) = server.run(stack).await;
+    error!("DHCP server cannot bind port 67: {:?}", error);
 }
 ```
 
@@ -165,7 +167,10 @@ async fn main(_spawner: Spawner) {
 
     let mut server: DhcpServer<32, 4> = DhcpServer::with_config(config);
     let mut buffers = DHCPServerBuffers::new();
-    let mut socket = DHCPServerSocket::new(stack, &mut buffers);
+    let Ok(mut socket) = DHCPServerSocket::new(stack, &mut buffers) else {
+        error!("DHCP server cannot bind port 67");
+        return;
+    };
     loop {
         let Ok(event) = server.lease_one(&mut socket).await else {
             continue;
@@ -207,7 +212,7 @@ async fn main(_spawner: Spawner) {
 
     let mut server: DhcpServer<32, 4> = DhcpServer::with_config(config);
 
-    server.run_with_callback(stack, |event| {
+    let Err(error) = server.run_with_callback(stack, |event| {
         match event {
             TransactionEvent::Leased(ip, mac) => {
                 info!("New lease: {} -> {:02x?}", ip, mac);
@@ -217,6 +222,7 @@ async fn main(_spawner: Spawner) {
             }
         }
     }).await;
+    error!("DHCP server cannot bind port 67: {:?}", error);
 }
 ```
 
@@ -232,7 +238,7 @@ use leasehund::AdmissionEvent;
 const BLOCKED_CLIENT: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 
 // Construct `server` and initialize `stack` as shown above.
-server.run_with_filter_and_callback(
+let Err(error) = server.run_with_filter_and_callback(
     stack,
     |mac, event| match event {
         AdmissionEvent::Discover | AdmissionEvent::Request | AdmissionEvent::Inform => {
@@ -314,7 +320,7 @@ generic, default 4) can be added. Static leases on a pool's subnet work once the
 client sent, if any (cut to 32 bytes):
 
 ```rust,ignore
-server.run_with_lease_callback(stack, |_, _| true, |event, lease| {
+let Err(error) = server.run_with_lease_callback(stack, |_, _| true, |event, lease| {
     if let (TransactionEvent::Leased(ip, _), Some(name)) = (event, lease.hostname) {
         // show "{name} -> {ip}" on a status page
     }
@@ -323,6 +329,28 @@ server.run_with_lease_callback(stack, |_, _| true, |event, lease| {
 
 `lease_one_with_lease()` does the same for manual transaction handling, and `leases()` /
 `lease_for()` include the host name too.
+
+### Without Embassy
+
+The server core does no I/O. Disable default features to build it without Embassy, receive
+datagrams on UDP port 67 with your own stack, and send each reply where it says:
+
+```toml
+[dependencies]
+leasehund = { version = "0.7", default-features = false }
+```
+
+```rust,ignore
+let outcome = server.handle_packet(&datagram, now_ms, |_mac, _event| true);
+if let Some(reply) = &outcome.reply {
+    udp.send_to(reply.bytes(), reply.destination()); // from port 67
+}
+if let Some((event, lease)) = outcome.event {
+    // a lease was granted or released
+}
+```
+
+`now_ms` is any monotonic clock in milliseconds; lease expiry times use the same clock.
 
 ### Validating the Configuration
 
@@ -401,7 +429,7 @@ let server = DhcpServer::<32, 4>::new(
 ## Requirements
 
 - **Rust**: Edition 2024 or later
-- **Embassy**: Compatible with Embassy async runtime
+- **Embassy**: Optional; the default `embassy` feature adds the Embassy adapter
 - **no_std**: Fully compatible with no_std environments
 - **Memory**: Approximately 2KB RAM for lease storage and buffers
 

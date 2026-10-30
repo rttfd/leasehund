@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `DhcpServer::handle_packet()`: the transport-free core. It turns one datagram received on port 67 into an `Outcome` (the `Reply` to send, with its bytes and `SocketAddrV4` destination, and the completed lease event) given the current time in milliseconds, without any I/O. Use it to run the server on any UDP stack. `DhcpServer::purge_expired_leases_at()` purges by the same clock.
+- An `embassy` feature, enabled by default, for the Embassy adapter (`DHCPServerSocket`, `DHCPServerBuffers`, `lease_one*()`, `run*()`, `purge_expired_leases()`). With `default-features = false` the crate builds without `embassy-net` and `embassy-time`.
+- Criterion benchmarks for the per-packet core (`make bench`, `make bench-save`, `make bench-compare`).
+
+### Changed
+
+- **BREAKING**: `DHCPServerSocket::new()` returns `Result<DHCPServerSocket, BindError>` instead of panicking when the socket cannot be bound to port 67. `BindError` is re-exported next to `RecvError`.
+- **BREAKING**: `run()`, `run_with_callback()`, `run_with_filter_and_callback()` and `run_with_lease_callback()` return `Result<Infallible, BindError>` instead of `!`, for the same reason. They still never return normally; `let Err(error) = server.run(stack).await;` is irrefutable.
+- **BREAKING** for `default-features = false` users only: the Embassy adapter now needs the `embassy` feature.
+- The `defmt` feature no longer needs Embassy.
+
 ## [0.7.0] - 2026-10-30
 
 ### Fixed

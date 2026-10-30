@@ -44,11 +44,8 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ### CI Requirements
 
-All PRs must pass:
-- `cargo fmt` check
-- `cargo clippy -- -D warnings`
-- `cargo test`
-- Branch naming validation
+All PRs must pass `make ci` (formatting, `check` and `lint` on every feature set, the tests, and
+the documentation build) and branch naming validation. See `AGENTS.md` for the code rules.
 
 ### Releasing
 
