@@ -73,6 +73,14 @@ impl Msg {
         self
     }
 
+    fn hostname(mut self, name: &[u8]) -> Self {
+        self.options
+            .extend_from_slice(&[options::HOST_NAME, u8::try_from(name.len()).unwrap()])
+            .unwrap();
+        self.options.extend_from_slice(name).unwrap();
+        self
+    }
+
     const fn broadcast_flag(mut self) -> Self {
         self.packet.flags = BROADCAST_FLAG.to_be();
         self
@@ -1243,4 +1251,81 @@ fn add_pool_validation() {
         )),
         Err(ConfigError::TooManyPools)
     );
+}
+
+// ---------------------------------------------------------------- host names
+
+#[test]
+fn hostname_is_kept_with_the_lease() {
+    let mut server = server();
+    process(
+        &mut server,
+        &Msg::new(DHCP_DISCOVER, MAC_A).hostname(b"printer"),
+        0,
+    );
+    let reserved = server.lease_for(MAC_A).unwrap();
+    assert_eq!(reserved.hostname.unwrap().as_str(), "printer");
+
+    // The request does not repeat the name; it is kept.
+    let request = Msg::new(DHCP_REQUEST, MAC_A)
+        .server_id(SERVER)
+        .requested(ip(100));
+    let action = server.prepare_packet_with_filter(&request.bytes(), &mut |_, _| true, 1);
+    let (event, lease) = action.event.unwrap();
+    assert_eq!(event, TransactionEvent::Leased(ip(100), MAC_A));
+    assert_eq!(lease.hostname.unwrap().as_str(), "printer");
+    assert!(lease.bound);
+
+    // A later request with a new name replaces it.
+    let renew = Msg::new(DHCP_REQUEST, MAC_A)
+        .ciaddr(ip(100))
+        .hostname(b"printer-2");
+    process(&mut server, &renew, 2);
+    assert_eq!(
+        server.lease_for(MAC_A).unwrap().hostname.unwrap().as_str(),
+        "printer-2"
+    );
+
+    // The release event carries the lease that was removed.
+    let release = Msg::new(DHCP_RELEASE, MAC_A).ciaddr(ip(100));
+    let action = server.prepare_packet_with_filter(&release.bytes(), &mut |_, _| true, 3);
+    let (event, lease) = action.event.unwrap();
+    assert_eq!(event, TransactionEvent::Released(ip(100), MAC_A));
+    assert_eq!(lease.hostname.unwrap().as_str(), "printer-2");
+}
+
+#[test]
+fn clients_without_a_hostname() {
+    let mut server = server();
+    lease(&mut server, MAC_A, 0);
+    assert_eq!(server.lease_for(MAC_A).unwrap().hostname, None);
+}
+
+#[test]
+fn hostname_parsing() {
+    let parse = |bytes: &[u8]| {
+        Hostname::parse(bytes).map(|name| heapless::String::<64>::try_from(name.as_str()).unwrap())
+    };
+    assert_eq!(parse(b"nas").as_deref(), Some("nas"));
+    // NUL-terminated names, as some clients send them.
+    assert_eq!(parse(b"nas\0\0").as_deref(), Some("nas"));
+    assert_eq!(parse(b"").as_deref(), None);
+    assert_eq!(parse(b"\0").as_deref(), None);
+    // Invalid UTF-8 ends the name.
+    assert_eq!(parse(b"cam\xff1").as_deref(), Some("cam"));
+    assert_eq!(parse(b"\xffcam").as_deref(), None);
+
+    // Long names are cut to MAX_HOSTNAME_LEN bytes, at a character boundary.
+    let long = [b'a'; 40];
+    assert_eq!(parse(&long).unwrap().len(), MAX_HOSTNAME_LEN);
+    let mut accented = [b'a'; MAX_HOSTNAME_LEN + 1];
+    // 'é' (2 bytes) straddling the limit is dropped whole.
+    accented[MAX_HOSTNAME_LEN - 1] = 0xC3;
+    accented[MAX_HOSTNAME_LEN] = 0xA9;
+    assert_eq!(parse(&accented).unwrap().len(), MAX_HOSTNAME_LEN - 1);
+
+    let name = Hostname::parse(b"nas").unwrap();
+    let mut shown = heapless::String::<16>::new();
+    core::fmt::write(&mut shown, format_args!("{name} {name:?}")).unwrap();
+    assert_eq!(shown.as_str(), "nas \"nas\"");
 }

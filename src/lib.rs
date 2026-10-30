@@ -168,6 +168,8 @@ const DEFAULT_LEASE_TIME: u32 = 86400; // 24 hours in seconds
 const SOCKET_BUFFER_SIZE: usize = 1024;
 const DEFAULT_MAX_STATIC: usize = 8;
 const DEFAULT_MAX_POOLS: usize = 4;
+/// Longest client host name kept with a lease, in bytes.
+pub const MAX_HOSTNAME_LEN: usize = 32;
 
 /// Duration in milliseconds to reserve an offered IP before the client confirms.
 const OFFER_RESERVATION_MS: u64 = 60_000;
@@ -520,6 +522,7 @@ struct LeaseEntry {
     expires_at: u64,
     /// `false` while the address is only reserved for an outstanding offer.
     bound: bool,
+    hostname: Option<Hostname>,
 }
 
 impl LeaseEntry {
@@ -529,7 +532,62 @@ impl LeaseEntry {
             mac: self.mac,
             expires_at_ms: self.expires_at,
             bound: self.bound,
+            hostname: self.hostname,
         }
+    }
+}
+
+/// A client's host name (DHCP option 12), as sent by the client.
+///
+/// Names longer than [`MAX_HOSTNAME_LEN`] bytes are cut to that length (at a
+/// character boundary). It is whatever the client claims, so do not trust it
+/// for anything but display and logging.
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Hostname {
+    bytes: [u8; MAX_HOSTNAME_LEN],
+    len: u8,
+}
+
+impl Hostname {
+    /// Parse the value of option 12: trailing NUL bytes are dropped, invalid
+    /// UTF-8 ends the name, and an empty result is `None`.
+    fn parse(value: &[u8]) -> Option<Self> {
+        let value = &value[..value.len().min(MAX_HOSTNAME_LEN)];
+        let valid = match core::str::from_utf8(value) {
+            Ok(text) => text,
+            // The prefix up to the error is valid UTF-8.
+            Err(error) => core::str::from_utf8(&value[..error.valid_up_to()]).ok()?,
+        };
+        let name = valid.trim_end_matches('\0');
+        if name.is_empty() {
+            return None;
+        }
+        let mut bytes = [0; MAX_HOSTNAME_LEN];
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        Some(Self {
+            bytes,
+            len: u8::try_from(name.len()).ok()?,
+        })
+    }
+
+    /// The host name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // Only valid UTF-8 is ever stored.
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl core::fmt::Debug for Hostname {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl core::fmt::Display for Hostname {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -651,6 +709,8 @@ pub struct Lease {
     /// `true` once the client accepted the lease (`DHCPACK` sent), `false`
     /// while the address is only reserved for an offer.
     pub bound: bool,
+    /// The host name the client sent (option 12), if any.
+    pub hostname: Option<Hostname>,
 }
 
 /// Why [`DhcpServer::add_static_lease`] failed.
@@ -769,6 +829,7 @@ struct ClientMessage {
     giaddr: Option<Ipv4Addr>,
     requested_ip: Option<Ipv4Addr>,
     server_id: Option<Ipv4Addr>,
+    hostname: Option<Hostname>,
 }
 
 /// `None` for the unspecified address `0.0.0.0`.
@@ -1271,18 +1332,23 @@ impl<
     }
 
     /// Store a lease, returning `false` if the table is full.
+    ///
+    /// A client that sent no host name this time keeps the one it sent before.
     fn record(
         &mut self,
         mac: [u8; 6],
         ip: Ipv4Addr,
         expires_at: u64,
         bound: bool,
+        hostname: Option<Hostname>,
     ) -> Option<Lease> {
+        let hostname = hostname.or_else(|| self.leases.get(&mac).and_then(|lease| lease.hostname));
         let entry = LeaseEntry {
             ip,
             mac,
             expires_at,
             bound,
+            hostname,
         };
         self.leases.insert(mac, entry).ok()?;
         Some(entry.to_lease())
@@ -1323,6 +1389,7 @@ impl<
             giaddr: non_zero(packet.giaddr),
             requested_ip: options::find_ipv4(options, options::REQUESTED_IP),
             server_id: options::find_ipv4(options, options::SERVER_ID),
+            hostname: options::find(options, options::HOST_NAME).and_then(Hostname::parse),
         })
     }
 
@@ -1438,7 +1505,7 @@ impl<
         let reserved = if already_bound {
             true
         } else {
-            self.record(mac, ip, now + OFFER_RESERVATION_MS, false)
+            self.record(mac, ip, now + OFFER_RESERVATION_MS, false, message.hostname)
                 .is_some()
         };
         if !reserved {
@@ -1472,7 +1539,7 @@ impl<
         };
 
         let lease = if self.may_bind(mac, ip, subnet) {
-            self.record(mac, ip, self.lease_expiry(now), true)
+            self.record(mac, ip, self.lease_expiry(now), true, message.hostname)
         } else {
             None
         };
@@ -1683,8 +1750,31 @@ impl<
     pub async fn lease_one_with_filter<P>(
         &mut self,
         socket: &mut DHCPServerSocket<'_>,
-        mut allow_client: P,
+        allow_client: P,
     ) -> Result<TransactionEvent, RecvError>
+    where
+        P: FnMut([u8; 6], AdmissionEvent) -> bool,
+    {
+        self.lease_one_with_lease(socket, allow_client)
+            .await
+            .map(|(event, _)| event)
+    }
+
+    /// Like [`lease_one_with_filter`](Self::lease_one_with_filter), also
+    /// returning the [`Lease`] the transaction concerns: the new lease for
+    /// [`TransactionEvent::Leased`], the removed one for
+    /// [`TransactionEvent::Released`]. It carries details such as the client's
+    /// host name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecvError`] if there was an error receiving a packet.
+    #[allow(clippy::future_not_send)]
+    pub async fn lease_one_with_lease<P>(
+        &mut self,
+        socket: &mut DHCPServerSocket<'_>,
+        mut allow_client: P,
+    ) -> Result<(TransactionEvent, Lease), RecvError>
     where
         P: FnMut([u8; 6], AdmissionEvent) -> bool,
     {
@@ -1696,7 +1786,7 @@ impl<
                 .handle_packet_with_filter(socket, &buf[..len], &mut allow_client)
                 .await;
             socket.socket.flush().await;
-            if let Some((event, _)) = event {
+            if let Some(event) = event {
                 return Ok(event);
             }
         }
@@ -1786,12 +1876,48 @@ impl<
     pub async fn run_with_filter_and_callback<P, F>(
         &mut self,
         stack: Stack<'_>,
-        mut allow_client: P,
+        allow_client: P,
         mut callback: F,
     ) -> !
     where
         P: FnMut([u8; 6], AdmissionEvent) -> bool,
         F: FnMut(TransactionEvent),
+    {
+        self.run_with_lease_callback(stack, allow_client, |event, _| callback(event))
+            .await
+    }
+
+    /// Like [`run_with_filter_and_callback`](Self::run_with_filter_and_callback),
+    /// also passing the [`Lease`] each event concerns: the new lease for
+    /// [`TransactionEvent::Leased`], the removed one for
+    /// [`TransactionEvent::Released`].
+    ///
+    /// ```rust,no_run
+    /// use core::net::Ipv4Addr;
+    /// use leasehund::{DhcpServer, TransactionEvent};
+    /// # use embassy_net::Stack;
+    ///
+    /// # async fn example(stack: Stack<'static>, mut server: DhcpServer) {
+    /// server
+    ///     .run_with_lease_callback(stack, |_, _| true, |event, lease| {
+    ///         if let (TransactionEvent::Leased(ip, _), Some(name)) = (event, lease.hostname) {
+    ///             // for example: show "printer.lan -> 192.168.1.50" on a display
+    ///             let _ = (ip, name.as_str());
+    ///         }
+    ///     })
+    ///     .await;
+    /// # }
+    /// ```
+    #[allow(clippy::future_not_send)]
+    pub async fn run_with_lease_callback<P, F>(
+        &mut self,
+        stack: Stack<'_>,
+        mut allow_client: P,
+        mut callback: F,
+    ) -> !
+    where
+        P: FnMut([u8; 6], AdmissionEvent) -> bool,
+        F: FnMut(TransactionEvent, &Lease),
     {
         let mut buffers = DHCPServerBuffers::new();
         let mut socket = DHCPServerSocket::new(stack, &mut buffers);
@@ -1799,11 +1925,11 @@ impl<
             let mut buf = [0u8; SOCKET_BUFFER_SIZE];
             match socket.socket.recv_from(&mut buf).await {
                 Ok((len, _)) => {
-                    if let Some((event, _)) = self
+                    if let Some((event, lease)) = self
                         .handle_packet_with_filter(&socket, &buf[..len], &mut allow_client)
                         .await
                     {
-                        callback(event);
+                        callback(event, &lease);
                     }
                     socket.socket.flush().await;
                 }
