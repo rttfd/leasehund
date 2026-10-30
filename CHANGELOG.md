@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.7.0] - 2026-10-30
+
 ### Fixed
 
 - A `DHCPDISCOVER` from a client that already held a lease was offered a different address, and its full lease was cut down to a 60-second offer reservation. It is now offered its current address and keeps its lease.
@@ -151,7 +153,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable IP pools and lease management
 - Essential DHCP options support (subnet mask, router, DNS)
 
-[Unreleased]: https://github.com/rttfd/leasehund/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/rttfd/leasehund/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/rttfd/leasehund/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rttfd/leasehund/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/rttfd/leasehund/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/rttfd/leasehund/compare/v0.5.0...v0.5.1
