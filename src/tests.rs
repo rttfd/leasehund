@@ -13,6 +13,7 @@ fn config_builder_basic() {
         .add_dns_server(Ipv4Addr::new(8, 8, 8, 8))
         .ip_pool(Ipv4Addr::new(10, 0, 0, 100), Ipv4Addr::new(10, 0, 0, 200))
         .lease_time(3600)
+        .domain_name("home.arpa")
         .build();
     assert_eq!(config.server_ip, Ipv4Addr::new(10, 0, 0, 1));
     assert_eq!(config.subnet_mask, Ipv4Addr::new(255, 255, 255, 0));
@@ -22,6 +23,7 @@ fn config_builder_basic() {
     assert_eq!(config.ip_pool_start, Ipv4Addr::new(10, 0, 0, 100));
     assert_eq!(config.ip_pool_end, Ipv4Addr::new(10, 0, 0, 200));
     assert_eq!(config.lease_time, 3600);
+    assert_eq!(config.domain_name, Some("home.arpa"));
 }
 
 #[test]
@@ -202,4 +204,80 @@ fn pad_before_message_type_is_understood() {
 
     assert!(action.is_some());
     assert_eq!(server.leases.len(), 1);
+}
+
+#[test]
+fn config_validation() {
+    use super::ConfigError;
+    static LONG: [u8; 256] = [b'x'; 256];
+    let ip = |last| Ipv4Addr::new(10, 0, 0, last);
+    let base = || {
+        TestBuilder::new()
+            .server_ip(ip(1))
+            .subnet_mask(Ipv4Addr::new(255, 255, 255, 0))
+            .no_router()
+            .ip_pool(ip(100), ip(200))
+    };
+    assert!(base().try_build().is_ok());
+    assert!(TestConfig::default().validate().is_ok());
+    assert_eq!(
+        base().ip_pool(ip(200), ip(100)).try_build().unwrap_err(),
+        ConfigError::PoolStartAfterEnd
+    );
+    assert_eq!(
+        base()
+            .ip_pool(ip(100), Ipv4Addr::new(10, 0, 1, 5))
+            .try_build()
+            .unwrap_err(),
+        ConfigError::PoolOutsideSubnet
+    );
+    assert_eq!(
+        base()
+            .subnet_mask(Ipv4Addr::new(255, 0, 255, 0))
+            .try_build()
+            .unwrap_err(),
+        ConfigError::InvalidSubnetMask
+    );
+    assert_eq!(
+        base().lease_time(0).try_build().unwrap_err(),
+        ConfigError::ZeroLeaseTime
+    );
+    // The builder's default router is on 192.168.1.0/24, not this subnet.
+    assert_eq!(
+        TestBuilder::new()
+            .server_ip(ip(1))
+            .ip_pool(ip(100), ip(200))
+            .try_build()
+            .unwrap_err(),
+        ConfigError::RouterOutsideSubnet
+    );
+    assert!(base().router(ip(254)).try_build().is_ok());
+    let long = core::str::from_utf8(&LONG).unwrap();
+    assert_eq!(
+        base().domain_name(long).try_build().unwrap_err(),
+        ConfigError::DomainNameTooLong
+    );
+}
+
+#[test]
+fn offer_carries_the_domain_name() {
+    let config = TestBuilder::new()
+        .server_ip(Ipv4Addr::new(10, 0, 0, 1))
+        .router(Ipv4Addr::new(10, 0, 0, 1))
+        .ip_pool(Ipv4Addr::new(10, 0, 0, 100), Ipv4Addr::new(10, 0, 0, 101))
+        .domain_name("lan")
+        .build();
+    let mut server = TestServer::with_config(config);
+    let data = dhcp_packet(super::DHCP_DISCOVER, [0, 1, 2, 3, 4, 5]);
+
+    let action = server
+        .prepare_packet_with_filter(&data, &mut |_, _| true)
+        .unwrap();
+
+    let reply = action.response.unwrap();
+    let options = &reply[super::FIXED_PART_SIZE..];
+    assert_eq!(
+        super::options::find(options, super::options::DOMAIN_NAME),
+        Some(&b"lan"[..])
+    );
 }

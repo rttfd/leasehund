@@ -8,6 +8,7 @@ pub const END: u8 = 255;
 pub const SUBNET_MASK: u8 = 1;
 pub const ROUTER: u8 = 3;
 pub const DNS_SERVER: u8 = 6;
+pub const DOMAIN_NAME: u8 = 15;
 pub const LEASE_TIME: u8 = 51;
 pub const MESSAGE_TYPE: u8 = 53;
 pub const SERVER_ID: u8 = 54;

@@ -185,6 +185,7 @@ const OFFER_RESERVATION_MS: u64 = 60_000;
 ///     ip_pool_start: Ipv4Addr::new(192, 168, 1, 100),
 ///     ip_pool_end: Ipv4Addr::new(192, 168, 1, 200),
 ///     lease_time: 3600,
+///     domain_name: None,
 /// };
 ///
 /// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
@@ -205,6 +206,8 @@ pub struct DhcpConfig<const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS> {
     pub ip_pool_end: Ipv4Addr,
     /// Lease time in seconds (default: 24 hours)
     pub lease_time: u32,
+    /// Domain name handed to clients (option 15), for example `"lan"`.
+    pub domain_name: Option<&'static str>,
 }
 
 impl<const MAX_DNS: usize> Default for DhcpConfig<MAX_DNS> {
@@ -219,7 +222,69 @@ impl<const MAX_DNS: usize> Default for DhcpConfig<MAX_DNS> {
             ip_pool_start: Ipv4Addr::new(192, 168, 1, 100),
             ip_pool_end: Ipv4Addr::new(192, 168, 1, 200),
             lease_time: DEFAULT_LEASE_TIME,
+            domain_name: None,
         }
+    }
+}
+
+/// A problem found by [`DhcpConfig::validate`].
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ConfigError {
+    /// `ip_pool_start` is after `ip_pool_end`.
+    PoolStartAfterEnd,
+    /// The pool is not inside the server's subnet (`server_ip` and
+    /// `subnet_mask`), so clients would get addresses they cannot use.
+    PoolOutsideSubnet,
+    /// The subnet mask is not a contiguous run of one bits.
+    InvalidSubnetMask,
+    /// The router is not inside the server's subnet. The builder starts with
+    /// router `192.168.1.1`, so this usually means `.router()` or
+    /// `.no_router()` was forgotten after changing the server address.
+    RouterOutsideSubnet,
+    /// A lease time of zero seconds.
+    ZeroLeaseTime,
+    /// The domain name is longer than the 255 bytes an option can hold.
+    DomainNameTooLong,
+}
+
+impl<const MAX_DNS: usize> DhcpConfig<MAX_DNS> {
+    /// Checks the configuration for mistakes that would make the server hand
+    /// out unusable leases.
+    ///
+    /// The server, router, network and broadcast addresses may lie inside the
+    /// pool: they are never assigned.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ConfigError`] found.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let mask = u32::from(self.subnet_mask);
+        if mask.leading_ones() + mask.trailing_zeros() != 32 {
+            return Err(ConfigError::InvalidSubnetMask);
+        }
+        let start = u32::from(self.ip_pool_start);
+        let end = u32::from(self.ip_pool_end);
+        if start > end {
+            return Err(ConfigError::PoolStartAfterEnd);
+        }
+        let network = u32::from(self.server_ip) & mask;
+        if start & mask != network || end & mask != network {
+            return Err(ConfigError::PoolOutsideSubnet);
+        }
+        if self
+            .router
+            .is_some_and(|router| u32::from(router) & mask != network)
+        {
+            return Err(ConfigError::RouterOutsideSubnet);
+        }
+        if self.lease_time == 0 {
+            return Err(ConfigError::ZeroLeaseTime);
+        }
+        if self.domain_name.is_some_and(|name| name.len() > 255) {
+            return Err(ConfigError::DomainNameTooLong);
+        }
+        Ok(())
     }
 }
 
@@ -325,10 +390,28 @@ impl<const MAX_DNS: usize> DhcpConfigBuilder<MAX_DNS> {
         self
     }
 
+    /// Sets the domain name handed to clients (option 15).
+    #[must_use]
+    pub const fn domain_name(mut self, name: &'static str) -> Self {
+        self.config.domain_name = Some(name);
+        self
+    }
+
     /// Builds the final configuration.
     #[must_use]
     pub fn build(self) -> DhcpConfig<MAX_DNS> {
         self.config
+    }
+
+    /// Builds the configuration after checking it with
+    /// [`DhcpConfig::validate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ConfigError`] found.
+    pub fn try_build(self) -> Result<DhcpConfig<MAX_DNS>, ConfigError> {
+        self.config.validate()?;
+        Ok(self.config)
     }
 }
 
@@ -608,6 +691,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
             ip_pool_start,
             ip_pool_end,
             lease_time: DEFAULT_LEASE_TIME,
+            domain_name: None,
         };
         Self {
             config,
@@ -697,6 +781,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
     ///     ip_pool_start: Ipv4Addr::new(10, 0, 0, 100),
     ///     ip_pool_end: Ipv4Addr::new(10, 0, 0, 102),
     ///     lease_time: 3600,
+    ///     domain_name: None,
     /// };
     /// let server: DhcpServer<32, 4> = DhcpServer::with_config(config);
     /// let next = server.get_next_available_ip();
@@ -744,6 +829,13 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize> DhcpServer<MAX_CLIENTS, MAX
         packet
             .extend_from_slice(&self.config.lease_time.to_be_bytes())
             .ok();
+        if let Some(domain) = self.config.domain_name
+            && let Ok(len) = u8::try_from(domain.len())
+            && packet.len() + 2 + domain.len() < packet.capacity()
+        {
+            packet.extend_from_slice(&[options::DOMAIN_NAME, len]).ok();
+            packet.extend_from_slice(domain.as_bytes()).ok();
+        }
         packet.extend_from_slice(&[options::END]).ok();
     }
 
