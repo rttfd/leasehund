@@ -30,8 +30,18 @@ embassy = ["dep:embassy-net", "dep:embassy-time"]
 defmt = ["dep:defmt", "defmt/ip_in_core", "embassy-net?/defmt"]
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false }
 critical-section = { version = "1.2.0", features = ["std"] }
 embassy-time = { version = "0.5.1", features = ["mock-driver"] }
+
+[[bench]]
+name = "server"
+harness = false
+
+# Optimized, with symbols, for `samply` and `cargo flamegraph`.
+[profile.profiling]
+inherits = "release"
+debug = true
 
 [lints.rust]
 missing_docs = "warn"
