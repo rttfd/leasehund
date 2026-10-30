@@ -39,7 +39,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-leasehund = "0.6"
+leasehund = "0.7"
 ```
 
 ## Usage
