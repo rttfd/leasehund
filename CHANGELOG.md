@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- A `DHCPDISCOVER` from a client that already held a lease was offered a different address, and its full lease was cut down to a 60-second offer reservation. It is now offered its current address and keeps its lease.
+- When the pool or the lease table was exhausted, the server sent a `DHCPOFFER` (and could send a `DHCPACK`) for `0.0.0.0`, or for an address it could not record, which could then be handed out twice. It now stays silent for offers and answers requests with `DHCPNAK`.
+- `DHCPREQUEST` was always acknowledged, ignoring the requested address and the server identifier. On a network with another DHCP server, a client that accepted the other server's offer was still ACKed by this one. Requests for another server are now ignored (and free our reservation), and requests for an address that is wrong, taken or outside the pool get a `DHCPNAK` (RFC 2131 section 4.3.2). A request without any address is ignored instead of being ACKed with the next free address.
+- The server's own address, the router, and the subnet's network and broadcast addresses were offered when they fell inside the pool. They are now skipped.
+- `is_pool_full()` and the address search underflowed (a panic in debug builds) when `ip_pool_start` was after `ip_pool_end`.
+- PAD options (code 0) were read as options with a length byte, so a message type after padding was not found and the packet was dropped. Options are now parsed per RFC 2132, and a message-type option with the wrong length is rejected.
+- Received datagrams larger than 576 bytes were truncated by the receive buffer, which `lease_one()` reported as an error and `run()` dropped. Packets are now received into a buffer as large as the socket's.
+- Replies did not copy `giaddr` and `flags` from the request, and were always broadcast. Replies to relayed requests now go to the relay agent on port 67, renewals and `DHCPINFORM` answers go to the client's address, and a NAK through a relay sets the broadcast flag.
+- Packets that are not client requests (`op` other than BOOTREQUEST) or not Ethernet (`htype`/`hlen`) were processed with a garbage MAC address. They are now ignored.
+- More than 63 DNS servers produced a DNS option with length 0 followed by the addresses, corrupting the option list. At most 63 are sent, and every option is written whole or not at all.
+- A `DHCPRELEASE` naming another server, or an address other than the client's lease, released the lease anyway. It is now ignored.
+
+### Added
+
+- `DHCPNAK`, `DHCPDECLINE` (the declined address is withheld for 10 minutes) and `DHCPINFORM` (configuration without a lease) support.
+- Static leases: `DhcpServer::add_static_lease()` and `remove_static_lease()`, sized by a new third const generic `MAX_STATIC` (default 8). A static address may lie outside the pool and is never given to another client. While it is held by another client (leased before the static lease was added) or was declined, its client is served from the pool and moves to the static address at its next renewal.
+- Address selection follows RFC 2131 section 4.3.1: the client's static lease, its current binding, the address it asks for (option 50), then the next free address.
+- Clients that return after the server restarted (INIT-REBOOT or renewal with an address the server has no record of) are acknowledged when the address is free, so they keep their address.
+- Lease inspection and management: `leases()`, `lease_for()` and `revoke()`, with the new `Lease` type.
+- `DhcpConfig::validate()` and `DhcpConfigBuilder::try_build()` with `ConfigError`, which catch an inverted pool, a pool or router outside the subnet, a non-contiguous subnet mask, a zero lease time and an overlong domain name.
+- New reply options: renewal (T1, option 58) and rebinding (T2, option 59) times, broadcast address (option 28), and domain name (option 15) via `DhcpConfig::domain_name` / `DhcpConfigBuilder::domain_name()`. A lease time of `u32::MAX` is an infinite lease.
+- `AdmissionEvent::Inform`, so admission policies also cover `DHCPINFORM`.
+- Multiple subnets through DHCP relay agents: `DhcpServer::add_pool()` adds a `SubnetPool` (address range, subnet mask, optional router) for clients on another subnet. Relayed requests are served from the pool whose subnet contains the relay's address (`giaddr`), with that subnet's mask, router and broadcast address; DNS servers, lease time and domain name are shared. Requests from relays on unknown subnets are ignored, overlapping pools are rejected with `ConfigError::OverlappingSubnet`, and a client that moves between subnets is refused its old address and gets one from the new pool. Sized by a fourth const generic, `MAX_POOLS` (default 4).
+- Client host names: the host name option (12) is kept with the lease as `Lease::hostname` (a `Hostname`, at most `MAX_HOSTNAME_LEN` = 32 bytes, invalid UTF-8 and trailing NULs dropped). A client that omits it on a later request keeps its earlier name. `run_with_lease_callback()` and `lease_one_with_lease()` report the `Lease` alongside each `TransactionEvent`; the existing `TransactionEvent` is unchanged.
+
+### Changed
+
+- **BREAKING**: `DhcpConfig` has a new `domain_name: Option<&'static str>` field. Add `domain_name: None` when constructing it directly.
+- **BREAKING**: `AdmissionEvent` is now `#[non_exhaustive]` and has a new `Inform` variant; add a wildcard arm to `match` expressions.
+- `DhcpServer` has two new const generics, `MAX_STATIC` and `MAX_POOLS`, both with defaults, so `DhcpServer<32, 4>` keeps working.
+- Static leases must be on the server's subnet or a pool's subnet (`StaticLeaseError::OutsideSubnet` otherwise), and are only handed out while the client is on that subnet.
+- `is_pool_full()` now also reports a pool with no assignable address left (for example when the remaining addresses are reserved or declined).
+
 ## [0.6.0] - 2026-08-26
 
 ### Added
