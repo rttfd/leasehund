@@ -82,8 +82,8 @@ pub fn message_type(data: &[u8]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use core::net::Ipv4Addr;
+    use leasehund::options::*;
 
     #[test]
     fn iterates_options_and_skips_pad() {

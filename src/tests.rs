@@ -1,5 +1,5 @@
-use super::*;
 use core::net::Ipv4Addr;
+use leasehund::*;
 
 type TestServer = DhcpServer<4, 2, 2>;
 type TestBuilder = DhcpConfigBuilder<2>;
