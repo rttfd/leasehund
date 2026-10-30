@@ -18,14 +18,40 @@ embassy-net = { version = "0.9.1", features = [
     "dhcpv4",
     "medium-ethernet",
     "proto-ipv4",
-] }
-embassy-time = "0.5.1"
+], optional = true }
+embassy-time = { version = "0.5.1", optional = true }
 heapless = "0.9.3"
 defmt = { version = "1.1.1", optional = true }
 
 [features]
-defmt = ["dep:defmt", "embassy-net/defmt"]
+default = ["embassy"]
+# The Embassy adapter: `DHCPServerSocket`, `run` and `lease_one`.
+embassy = ["dep:embassy-net", "dep:embassy-time"]
+defmt = ["dep:defmt", "defmt/ip_in_core", "embassy-net?/defmt"]
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false }
 critical-section = { version = "1.2.0", features = ["std"] }
 embassy-time = { version = "0.5.1", features = ["mock-driver"] }
+
+[[bench]]
+name = "server"
+harness = false
+
+# Optimized, with symbols, for `samply` and `cargo flamegraph`.
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# `deny` rather than `forbid`, so tests and benches can opt out (see clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

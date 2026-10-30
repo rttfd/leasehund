@@ -1,0 +1,4 @@
+# Tests may unwrap, expect and panic; library code may not.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
