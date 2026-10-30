@@ -972,3 +972,275 @@ fn server_new_uses_one_dns_server() {
         Some(Ipv4Addr::new(192, 168, 1, 100))
     );
 }
+
+// ---------------------------------------------------------------- relay pools
+
+const RELAY: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 1);
+
+const fn remote(last: u8) -> Ipv4Addr {
+    Ipv4Addr::new(10, 0, 1, last)
+}
+
+/// `server()` plus a pool on 10.0.1.0/24 behind the relay 10.0.1.1.
+fn relayed_server() -> TestServer {
+    let mut server = server();
+    server
+        .add_pool(
+            SubnetPool::new(Ipv4Addr::new(255, 255, 255, 0), remote(100), remote(101))
+                .with_router(RELAY),
+        )
+        .unwrap();
+    server
+}
+
+/// DISCOVER and REQUEST through the relay.
+fn relayed_lease(server: &mut TestServer, mac: [u8; 6]) -> Option<Ipv4Addr> {
+    let (offer, _) = process(server, &Msg::new(DHCP_DISCOVER, mac).giaddr(RELAY), 0);
+    let offered = offer?.yiaddr();
+    let request = Msg::new(DHCP_REQUEST, mac)
+        .giaddr(RELAY)
+        .server_id(SERVER)
+        .requested(offered);
+    let (ack, _) = process(server, &request, 0);
+    let ack = ack?;
+    assert_eq!(ack.msg_type(), Some(DHCP_ACK));
+    Some(ack.yiaddr())
+}
+
+#[test]
+fn relayed_clients_get_addresses_from_their_pool() {
+    let mut server = relayed_server();
+
+    let (offer, _) = process(
+        &mut server,
+        &Msg::new(DHCP_DISCOVER, MAC_A).giaddr(RELAY),
+        0,
+    );
+    let offer = offer.unwrap();
+    assert_eq!(offer.yiaddr(), remote(100));
+    assert_eq!(offer.to, (RELAY, DHCP_SERVER_PORT));
+    // The pool's subnet configuration, the shared DNS server.
+    assert_eq!(
+        options::find_ipv4(offer.options(), options::ROUTER),
+        Some(RELAY)
+    );
+    assert_eq!(
+        options::find_ipv4(offer.options(), options::BROADCAST_ADDRESS),
+        Some(remote(255))
+    );
+    assert_eq!(
+        options::find_ipv4(offer.options(), options::SUBNET_MASK),
+        Some(Ipv4Addr::new(255, 255, 255, 0))
+    );
+    assert_eq!(
+        options::find_ipv4(offer.options(), options::SERVER_ID),
+        Some(SERVER)
+    );
+    assert_eq!(offer.option(options::DNS_SERVER), Some(&[1u8, 1, 1, 1][..]));
+
+    let request = Msg::new(DHCP_REQUEST, MAC_A)
+        .giaddr(RELAY)
+        .server_id(SERVER)
+        .requested(remote(100));
+    let (ack, event) = process(&mut server, &request, 0);
+    assert_eq!(ack.unwrap().yiaddr(), remote(100));
+    assert_eq!(event, Some(TransactionEvent::Leased(remote(100), MAC_A)));
+
+    // Local clients still use the main pool.
+    assert_eq!(lease(&mut server, MAC_B, 0), ip(100));
+}
+
+#[test]
+fn each_pool_is_exhausted_on_its_own() {
+    let mut server = relayed_server();
+    assert_eq!(
+        relayed_lease(&mut server, [2, 0, 0, 0, 3, 1]),
+        Some(remote(100))
+    );
+    assert_eq!(
+        relayed_lease(&mut server, [2, 0, 0, 0, 3, 2]),
+        Some(remote(101))
+    );
+    // The remote pool is full, but the main pool is untouched.
+    assert_eq!(relayed_lease(&mut server, [2, 0, 0, 0, 3, 3]), None);
+    assert_eq!(server.get_next_available_ip(), Some(ip(100)));
+}
+
+#[test]
+fn requests_from_unknown_relays_are_ignored() {
+    let mut server = relayed_server();
+    let stranger = Ipv4Addr::new(172, 16, 0, 1);
+    for msg in [
+        Msg::new(DHCP_DISCOVER, MAC_A).giaddr(stranger),
+        Msg::new(DHCP_REQUEST, MAC_A)
+            .giaddr(stranger)
+            .requested(ip(100)),
+        Msg::new(DHCP_INFORM, MAC_A)
+            .giaddr(stranger)
+            .ciaddr(Ipv4Addr::new(172, 16, 0, 9)),
+    ] {
+        assert!(process(&mut server, &msg, 0).0.is_none());
+    }
+    assert_eq!(server.lease_count(), 0);
+}
+
+#[test]
+fn relay_on_the_servers_own_subnet_uses_the_main_pool() {
+    let mut server = relayed_server();
+    let local_relay = ip(254);
+    let (offer, _) = process(
+        &mut server,
+        &Msg::new(DHCP_DISCOVER, MAC_A).giaddr(local_relay),
+        0,
+    );
+    let offer = offer.unwrap();
+    assert_eq!(offer.yiaddr(), ip(100));
+    assert_eq!(offer.to, (local_relay, DHCP_SERVER_PORT));
+}
+
+#[test]
+fn pool_infrastructure_addresses_are_skipped() {
+    let mut server = server();
+    // The whole /29 10.0.1.0-7, with the relay as router at .1.
+    server
+        .add_pool(
+            SubnetPool::new(Ipv4Addr::new(255, 255, 255, 248), remote(0), remote(7))
+                .with_router(RELAY),
+        )
+        .unwrap();
+    let mut offered = heapless::Vec::<Ipv4Addr, 8>::new();
+    for n in 0..4u8 {
+        if let Some(address) = relayed_lease(&mut server, [2, 0, 0, 0, 4, n]) {
+            offered.push(address).unwrap();
+        }
+    }
+    // .0 network, .1 router, .7 broadcast are skipped; 4 leases fill the table.
+    assert_eq!(
+        offered.as_slice(),
+        [remote(2), remote(3), remote(4), remote(5)]
+    );
+}
+
+#[test]
+fn client_moving_to_a_relayed_subnet_gets_a_new_address() {
+    let mut server = relayed_server();
+    assert_eq!(lease(&mut server, MAC_A, 0), ip(100));
+
+    // Rebooting on the other subnet with the old address: refused.
+    let reboot = Msg::new(DHCP_REQUEST, MAC_A)
+        .giaddr(RELAY)
+        .requested(ip(100));
+    let (nak, _) = process(&mut server, &reboot, 1);
+    assert_eq!(nak.unwrap().msg_type(), Some(DHCP_NAK));
+
+    // Starting over there works, and replaces the old lease.
+    assert_eq!(relayed_lease(&mut server, MAC_A), Some(remote(100)));
+    assert_eq!(server.lease_for(MAC_A).unwrap().ip, remote(100));
+    assert_eq!(server.get_next_available_ip(), Some(ip(100)));
+}
+
+#[test]
+fn init_reboot_on_a_relayed_subnet_after_restart() {
+    let mut server = relayed_server();
+    let reboot = Msg::new(DHCP_REQUEST, MAC_A)
+        .giaddr(RELAY)
+        .requested(remote(101));
+    let (ack, _) = process(&mut server, &reboot, 0);
+    let ack = ack.unwrap();
+    assert_eq!(ack.msg_type(), Some(DHCP_ACK));
+    assert_eq!(ack.yiaddr(), remote(101));
+}
+
+#[test]
+fn static_leases_on_relayed_subnets() {
+    let mut server = server();
+    // Before the pool exists, the address belongs to no known subnet.
+    assert_eq!(
+        server.add_static_lease(MAC_A, remote(50)),
+        Err(StaticLeaseError::OutsideSubnet)
+    );
+    server
+        .add_pool(SubnetPool::new(
+            Ipv4Addr::new(255, 255, 255, 0),
+            remote(100),
+            remote(101),
+        ))
+        .unwrap();
+    server.add_static_lease(MAC_A, remote(50)).unwrap();
+    assert_eq!(
+        server.add_static_lease(MAC_B, remote(255)),
+        Err(StaticLeaseError::ReservedAddress)
+    );
+
+    // Through the relay the static address is used ...
+    assert_eq!(relayed_lease(&mut server, MAC_A), Some(remote(50)));
+    // ... and locally the client gets a dynamic address instead.
+    let mut local = self::server();
+    local
+        .add_pool(SubnetPool::new(
+            Ipv4Addr::new(255, 255, 255, 0),
+            remote(100),
+            remote(101),
+        ))
+        .unwrap();
+    local.add_static_lease(MAC_A, remote(50)).unwrap();
+    assert_eq!(lease(&mut local, MAC_A, 0), ip(100));
+}
+
+#[test]
+fn add_pool_validation() {
+    let mask = Ipv4Addr::new(255, 255, 255, 0);
+    let mut server = DhcpServer::<4, 2, 2, 1>::with_config(
+        TestBuilder::new()
+            .server_ip(SERVER)
+            .subnet_mask(mask)
+            .ip_pool(ip(100), ip(103))
+            .build(),
+    );
+    for (pool, error) in [
+        (
+            SubnetPool::new(Ipv4Addr::new(255, 0, 255, 0), remote(1), remote(9)),
+            ConfigError::InvalidSubnetMask,
+        ),
+        (
+            SubnetPool::new(mask, remote(9), remote(1)),
+            ConfigError::PoolStartAfterEnd,
+        ),
+        (
+            SubnetPool::new(mask, remote(1), Ipv4Addr::new(10, 0, 2, 9)),
+            ConfigError::PoolOutsideSubnet,
+        ),
+        (
+            SubnetPool::new(mask, remote(1), remote(9)).with_router(ip(1)),
+            ConfigError::RouterOutsideSubnet,
+        ),
+        (
+            SubnetPool::new(mask, ip(150), ip(160)),
+            ConfigError::OverlappingSubnet,
+        ),
+        // A /16 that contains the server's /24.
+        (
+            SubnetPool::new(Ipv4Addr::new(255, 255, 0, 0), remote(1), remote(9)),
+            ConfigError::OverlappingSubnet,
+        ),
+    ] {
+        assert_eq!(server.add_pool(pool), Err(error), "{pool:?}");
+    }
+    assert!(server.pools().is_empty());
+
+    let first = SubnetPool::new(mask, remote(1), remote(9));
+    server.add_pool(first).unwrap();
+    assert_eq!(server.pools(), [first]);
+    assert_eq!(
+        server.add_pool(SubnetPool::new(mask, remote(20), remote(30))),
+        Err(ConfigError::OverlappingSubnet)
+    );
+    assert_eq!(
+        server.add_pool(SubnetPool::new(
+            mask,
+            Ipv4Addr::new(10, 0, 2, 1),
+            Ipv4Addr::new(10, 0, 2, 9)
+        )),
+        Err(ConfigError::TooManyPools)
+    );
+}

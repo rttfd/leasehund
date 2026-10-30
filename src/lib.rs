@@ -167,6 +167,7 @@ const DEFAULT_MAX_DNS_SERVERS: usize = 4;
 const DEFAULT_LEASE_TIME: u32 = 86400; // 24 hours in seconds
 const SOCKET_BUFFER_SIZE: usize = 1024;
 const DEFAULT_MAX_STATIC: usize = 8;
+const DEFAULT_MAX_POOLS: usize = 4;
 
 /// Duration in milliseconds to reserve an offered IP before the client confirms.
 const OFFER_RESERVATION_MS: u64 = 60_000;
@@ -258,6 +259,10 @@ pub enum ConfigError {
     ZeroLeaseTime,
     /// The domain name is longer than the 255 bytes an option can hold.
     DomainNameTooLong,
+    /// A [`SubnetPool`] overlaps the server's subnet or another pool.
+    OverlappingSubnet,
+    /// All `MAX_POOLS` additional pools are in use.
+    TooManyPools,
 }
 
 impl<const MAX_DNS: usize> DhcpConfig<MAX_DNS> {
@@ -528,7 +533,75 @@ impl LeaseEntry {
     }
 }
 
-/// The subnet a request is served from, as given by [`DhcpConfig`].
+/// An additional address pool for clients on another subnet, reached through
+/// a DHCP relay agent.
+///
+/// Requests forwarded by a relay carry the relay's address (`giaddr`). The
+/// server picks the pool whose subnet contains that address and assigns from
+/// it, with the pool's subnet mask and router. DNS servers, lease time and
+/// domain name are shared with the main [`DhcpConfig`]. Requests from relays on
+/// unknown subnets are ignored.
+///
+/// ```rust
+/// use core::net::Ipv4Addr;
+/// use leasehund::{DhcpServer, SubnetPool};
+///
+/// let mut server = DhcpServer::<32, 4>::new(
+///     Ipv4Addr::new(192, 168, 1, 1),
+///     Ipv4Addr::new(255, 255, 255, 0),
+///     Ipv4Addr::new(192, 168, 1, 1),
+///     Ipv4Addr::new(8, 8, 8, 8),
+///     Ipv4Addr::new(192, 168, 1, 100),
+///     Ipv4Addr::new(192, 168, 1, 200),
+/// );
+/// let sensors = SubnetPool::new(
+///     Ipv4Addr::new(255, 255, 255, 0),
+///     Ipv4Addr::new(192, 168, 2, 100),
+///     Ipv4Addr::new(192, 168, 2, 200),
+/// )
+/// .with_router(Ipv4Addr::new(192, 168, 2, 1));
+/// server.add_pool(sensors).unwrap();
+/// ```
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct SubnetPool {
+    /// Subnet mask handed to the pool's clients.
+    pub subnet_mask: Ipv4Addr,
+    /// Default gateway handed to the pool's clients, usually the relay.
+    pub router: Option<Ipv4Addr>,
+    /// First address of the pool.
+    pub ip_pool_start: Ipv4Addr,
+    /// Last address of the pool.
+    pub ip_pool_end: Ipv4Addr,
+}
+
+impl SubnetPool {
+    /// A pool from `ip_pool_start` to `ip_pool_end` on the subnet given by
+    /// `subnet_mask`, without a router.
+    #[must_use]
+    pub const fn new(
+        subnet_mask: Ipv4Addr,
+        ip_pool_start: Ipv4Addr,
+        ip_pool_end: Ipv4Addr,
+    ) -> Self {
+        Self {
+            subnet_mask,
+            router: None,
+            ip_pool_start,
+            ip_pool_end,
+        }
+    }
+
+    /// Sets the router handed to the pool's clients.
+    #[must_use]
+    pub const fn with_router(mut self, router: Ipv4Addr) -> Self {
+        self.router = Some(router);
+        self
+    }
+}
+
+/// The subnet a request is served from: the main one of [`DhcpConfig`] or a
+/// [`SubnetPool`].
 #[derive(Clone, Copy, Debug)]
 struct Subnet {
     network: u32,
@@ -557,6 +630,11 @@ impl Subnet {
         self.mask < 0xFFFF_FFFE
             && (ip.to_bits() == self.network || ip.to_bits() == self.broadcast().to_bits())
     }
+
+    const fn overlaps(&self, other: &Self) -> bool {
+        let common = self.mask & other.mask;
+        self.network & common == other.network & common
+    }
 }
 
 /// A lease as reported by [`DhcpServer::leases`].
@@ -583,8 +661,8 @@ pub enum StaticLeaseError {
     Full,
     /// The address is already reserved for a different MAC address.
     AddressTaken,
-    /// The address is not inside the server's subnet, so it could never be
-    /// handed out.
+    /// The address is not inside the server's subnet or any [`SubnetPool`],
+    /// so it could never be handed out.
     OutsideSubnet,
     /// The address is the server's own, the router's, or the network or
     /// broadcast address of the subnet.
@@ -743,6 +821,7 @@ impl<'a> DHCPServerSocket<'a> {
 ///   of two, as required by the underlying `heapless::FnvIndexMap`.
 /// - `MAX_DNS`: Maximum number of DNS servers in configuration
 /// - `MAX_STATIC`: Maximum number of static leases (fixed MAC to IP assignments)
+/// - `MAX_POOLS`: Maximum number of additional [`SubnetPool`]s for relayed clients
 ///
 /// # Examples
 ///
@@ -780,16 +859,23 @@ pub struct DhcpServer<
     const MAX_CLIENTS: usize = DEFAULT_MAX_CLIENTS,
     const MAX_DNS: usize = DEFAULT_MAX_DNS_SERVERS,
     const MAX_STATIC: usize = DEFAULT_MAX_STATIC,
+    const MAX_POOLS: usize = DEFAULT_MAX_POOLS,
 > {
     config: DhcpConfig<MAX_DNS>,
     leases: FnvIndexMap<[u8; 6], LeaseEntry, MAX_CLIENTS>,
     static_leases: Vec<([u8; 6], Ipv4Addr), MAX_STATIC>,
+    /// Pools for clients behind relay agents.
+    pools: Vec<SubnetPool, MAX_POOLS>,
     /// Addresses a client reported as in use, with when they become usable again.
     declined: Vec<(Ipv4Addr, u64), MAX_DECLINED>,
 }
 
-impl<const MAX_CLIENTS: usize, const MAX_DNS: usize, const MAX_STATIC: usize>
-    DhcpServer<MAX_CLIENTS, MAX_DNS, MAX_STATIC>
+impl<
+    const MAX_CLIENTS: usize,
+    const MAX_DNS: usize,
+    const MAX_STATIC: usize,
+    const MAX_POOLS: usize,
+> DhcpServer<MAX_CLIENTS, MAX_DNS, MAX_STATIC, MAX_POOLS>
 {
     /// Creates a new DHCP server with a single DNS server.
     ///
@@ -863,6 +949,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize, const MAX_STATIC: usize>
             config,
             leases: FnvIndexMap::new(),
             static_leases: Vec::new(),
+            pools: Vec::new(),
             declined: Vec::new(),
         }
     }
@@ -894,6 +981,49 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize, const MAX_STATIC: usize>
         self.leases.get(&mac).copied().map(LeaseEntry::to_lease)
     }
 
+    /// Adds a pool for clients behind a relay agent on another subnet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidSubnetMask`],
+    /// [`ConfigError::PoolStartAfterEnd`], [`ConfigError::PoolOutsideSubnet`]
+    /// (the start and end are on different subnets) or
+    /// [`ConfigError::RouterOutsideSubnet`] for an inconsistent pool,
+    /// [`ConfigError::OverlappingSubnet`] if its subnet overlaps the server's or
+    /// another pool's, and [`ConfigError::TooManyPools`] if all `MAX_POOLS`
+    /// slots are used.
+    pub fn add_pool(&mut self, pool: SubnetPool) -> Result<(), ConfigError> {
+        let mask = pool.subnet_mask.to_bits();
+        if mask.leading_ones() + mask.trailing_zeros() != 32 {
+            return Err(ConfigError::InvalidSubnetMask);
+        }
+        let subnet = Self::pool_subnet(&pool);
+        if subnet.start > subnet.end {
+            return Err(ConfigError::PoolStartAfterEnd);
+        }
+        if !subnet.contains(pool.ip_pool_end) {
+            return Err(ConfigError::PoolOutsideSubnet);
+        }
+        if pool.router.is_some_and(|router| !subnet.contains(router)) {
+            return Err(ConfigError::RouterOutsideSubnet);
+        }
+        if subnet.overlaps(&self.main_subnet())
+            || self
+                .pools
+                .iter()
+                .any(|other| subnet.overlaps(&Self::pool_subnet(other)))
+        {
+            return Err(ConfigError::OverlappingSubnet);
+        }
+        self.pools.push(pool).map_err(|_| ConfigError::TooManyPools)
+    }
+
+    /// The additional pools added with [`add_pool`](Self::add_pool).
+    #[must_use]
+    pub fn pools(&self) -> &[SubnetPool] {
+        &self.pools
+    }
+
     /// The server's own subnet, from the configuration.
     const fn main_subnet(&self) -> Subnet {
         let mask = self.config.subnet_mask.to_bits();
@@ -906,18 +1036,37 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize, const MAX_STATIC: usize>
         }
     }
 
-    /// The subnet to serve a request from: ours, for a request sent directly
-    /// or through a relay on our subnet. `None` for a relay on another subnet.
+    const fn pool_subnet(pool: &SubnetPool) -> Subnet {
+        let mask = pool.subnet_mask.to_bits();
+        Subnet {
+            network: pool.ip_pool_start.to_bits() & mask,
+            mask,
+            router: pool.router,
+            start: pool.ip_pool_start.to_bits(),
+            end: pool.ip_pool_end.to_bits(),
+        }
+    }
+
+    /// The subnet to serve a request from: the relay's (by `giaddr`) or our
+    /// own. `None` for a relay on a subnet we have no pool for.
     fn subnet_for(&self, giaddr: Option<Ipv4Addr>) -> Option<Subnet> {
         let main = self.main_subnet();
-        giaddr
-            .is_none_or(|relay| main.contains(relay))
-            .then_some(main)
+        match giaddr {
+            None => Some(main),
+            Some(relay) if main.contains(relay) => Some(main),
+            Some(relay) => self
+                .pools
+                .iter()
+                .map(Self::pool_subnet)
+                .find(|subnet| subnet.contains(relay)),
+        }
     }
 
     /// The subnet `ip` belongs to, if any.
     fn subnet_of(&self, ip: Ipv4Addr) -> Option<Subnet> {
-        Some(self.main_subnet()).filter(|subnet| subnet.contains(ip))
+        core::iter::once(self.main_subnet())
+            .chain(self.pools.iter().map(Self::pool_subnet))
+            .find(|subnet| subnet.contains(ip))
     }
 
     /// Forgets the lease of the client with `mac`, returning its address.
@@ -931,8 +1080,10 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize, const MAX_STATIC: usize>
     /// Always assigns `ip` to the client with `mac`.
     ///
     /// The address does not have to be inside the dynamic pool, but it must be
-    /// on the server's subnet. It is never handed out to another client.
-    /// Adding a static lease for a MAC that already has one replaces it.
+    /// on the server's subnet or the subnet of a [`SubnetPool`] (add pools
+    /// first). It is only handed out to the client while the client is on
+    /// that subnet, and never to another client. Adding a static lease for a MAC that already
+    /// has one replaces it.
     ///
     /// # Errors
     ///
@@ -1097,6 +1248,7 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize, const MAX_STATIC: usize>
     /// `DHCPREQUEST`).
     fn may_bind(&self, mac: [u8; 6], ip: Ipv4Addr, subnet: &Subnet) -> bool {
         if !subnet.contains(ip) {
+            // For example a client that moved to another relay's subnet.
             return false;
         }
         if self
@@ -1110,7 +1262,11 @@ impl<const MAX_CLIENTS: usize, const MAX_DNS: usize, const MAX_STATIC: usize>
         // address if it is free, so clients keep their addresses.
         self.leases.get(&mac).map_or_else(
             || self.is_assignable(ip, Some(mac), subnet),
-            |lease| lease.ip == ip && !self.declined.iter().any(|(d, _)| *d == ip),
+            |lease| {
+                (lease.ip == ip && !self.declined.iter().any(|(d, _)| *d == ip))
+                    // A lease on another subnet does not hold the client back.
+                    || (!subnet.contains(lease.ip) && self.is_assignable(ip, Some(mac), subnet))
+            },
         )
     }
 
