@@ -18,13 +18,16 @@ embassy-net = { version = "0.9.1", features = [
     "dhcpv4",
     "medium-ethernet",
     "proto-ipv4",
-] }
-embassy-time = "0.5.1"
+], optional = true }
+embassy-time = { version = "0.5.1", optional = true }
 heapless = "0.9.3"
 defmt = { version = "1.1.1", optional = true }
 
 [features]
-defmt = ["dep:defmt", "embassy-net/defmt"]
+default = ["embassy"]
+# The Embassy adapter: `DHCPServerSocket`, `run` and `lease_one`.
+embassy = ["dep:embassy-net", "dep:embassy-time"]
+defmt = ["dep:defmt", "defmt/ip_in_core", "embassy-net?/defmt"]
 
 [dev-dependencies]
 critical-section = { version = "1.2.0", features = ["std"] }
