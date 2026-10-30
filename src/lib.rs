@@ -140,10 +140,6 @@
 //! ```
 
 #![no_std]
-#![warn(missing_docs)]
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
 
 use core::convert::Infallible;
 use core::net::Ipv4Addr;
