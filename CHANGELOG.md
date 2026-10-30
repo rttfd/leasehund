@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.8.0] - 2026-10-31
+
 ### Added
 
 - `DhcpServer::handle_packet()`: the transport-free core. It turns one datagram received on port 67 into an `Outcome` (the `Reply` to send, with its bytes and `SocketAddrV4` destination, and the completed lease event) given the current time in milliseconds, without any I/O. Use it to run the server on any UDP stack. `DhcpServer::purge_expired_leases_at()` purges by the same clock.
@@ -166,7 +168,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable IP pools and lease management
 - Essential DHCP options support (subnet mask, router, DNS)
 
-[Unreleased]: https://github.com/rttfd/leasehund/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/rttfd/leasehund/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/rttfd/leasehund/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/rttfd/leasehund/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rttfd/leasehund/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/rttfd/leasehund/compare/v0.5.1...v0.5.2
