@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.8.1] - 2026-11-22
+
 ### Changed
 
-- Unsafe code is denied crate-wide except in the wire-format module (`packet`), where every block carries a SAFETY comment. `DhcpPacket::to_bytes()` replaces the unsafe byte views in `reply` and the tests.
+- Unsafe code is denied crate-wide except in the wire-format module (`packet`), where every block carries a SAFETY comment. `DhcpPacket::to_bytes()` replaces the unsafe byte views in `reply` and the tests. No public API change: `packet` is a private module.
 
 ### Fixed
 
@@ -176,7 +178,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable IP pools and lease management
 - Essential DHCP options support (subnet mask, router, DNS)
 
-[Unreleased]: https://github.com/rttfd/leasehund/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/rttfd/leasehund/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/rttfd/leasehund/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/rttfd/leasehund/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/rttfd/leasehund/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rttfd/leasehund/compare/v0.5.2...v0.6.0
