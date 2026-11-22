@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- Builds clean against current `heapless` 0.9.x: the lease map uses `swap_remove`, the explicit name for what `IndexMap::remove` did, which `heapless` now deprecates. No behaviour change.
+
 ## [0.8.0] - 2026-10-31
 
 ### Added
