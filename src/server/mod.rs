@@ -395,7 +395,7 @@ impl<
     /// The client is not told; it keeps using the address until its lease
     /// would have expired or it next renews (and is refused).
     pub fn revoke(&mut self, mac: [u8; 6]) -> Option<Ipv4Addr> {
-        self.leases.remove(&mac).map(|entry| entry.ip)
+        self.leases.swap_remove(&mac).map(|entry| entry.ip)
     }
 
     /// Always assigns `ip` to the client with `mac`.
@@ -444,7 +444,7 @@ impl<
             }
         }
         for mac in &expired {
-            self.leases.remove(mac);
+            self.leases.swap_remove(mac);
         }
         self.declined.retain(|(_, until)| *until > now);
     }
@@ -653,7 +653,7 @@ impl<
                 if !for_us {
                     // The client chose another server's offer: free ours.
                     if self.leases.get(&mac).is_some_and(|lease| !lease.bound) {
-                        self.leases.remove(&mac);
+                        self.leases.swap_remove(&mac);
                     }
                     return PacketAction::silent();
                 }
@@ -668,7 +668,7 @@ impl<
             DHCP_DECLINE => {
                 if for_us && let Some(ip) = message.requested_ip {
                     if self.leases.get(&mac).is_some_and(|lease| lease.ip == ip) {
-                        self.leases.remove(&mac);
+                        self.leases.swap_remove(&mac);
                     }
                     self.hold_declined(ip, now);
                 }
@@ -684,7 +684,7 @@ impl<
                     .get(&mac)
                     .is_some_and(|lease| message.ciaddr.is_none_or(|ip| ip == lease.ip));
                 let event = if matches {
-                    self.leases.remove(&mac).map(|entry| {
+                    self.leases.swap_remove(&mac).map(|entry| {
                         (
                             TransactionEvent::Released(entry.ip, entry.mac),
                             entry.to_lease(),
