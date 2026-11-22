@@ -5,7 +5,7 @@ use heapless::Vec;
 use leasehund::options;
 use leasehund::packet::{
     BOOTREPLY, BROADCAST_FLAG, ClientMessage, DHCP_ACK, DHCP_CLIENT_PORT, DHCP_MAGIC, DHCP_NAK,
-    DHCP_PACKET_SIZE, DHCP_SERVER_PORT, DhcpPacket, FIXED_PART_SIZE, HLEN_ETHERNET, HTYPE_ETHERNET,
+    DHCP_PACKET_SIZE, DHCP_SERVER_PORT, DhcpPacket, HLEN_ETHERNET, HTYPE_ETHERNET,
 };
 use leasehund::pool::Subnet;
 use leasehund::server::DhcpServer;
@@ -59,9 +59,7 @@ impl<
         resp.chaddr = request.chaddr;
 
         let mut bytes = Vec::<u8, DHCP_PACKET_SIZE>::new();
-        // Safe serialization of a packed struct: transmute to a byte array
-        // avoids alignment issues that from_raw_parts would have.
-        let resp_bytes: [u8; FIXED_PART_SIZE] = unsafe { core::mem::transmute(resp) };
+        let resp_bytes = resp.to_bytes();
         bytes.extend_from_slice(&resp_bytes).ok();
         self.add_options(&mut bytes, msg_type, yiaddr.is_some(), subnet);
         (bytes, Self::destination(message, msg_type))
