@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- Unsafe code is denied crate-wide except in the wire-format module (`packet`), where every block carries a SAFETY comment. `DhcpPacket::to_bytes()` replaces the unsafe byte views in `reply` and the tests.
+
 ### Fixed
 
 - Builds clean against current `heapless` 0.9.x: the lease map uses `swap_remove`, the explicit name for what `IndexMap::remove` did, which `heapless` now deprecates. No behaviour change.

@@ -91,7 +91,7 @@ impl Msg {
     }
 
     fn bytes(&self) -> heapless::Vec<u8, 600> {
-        let fixed: [u8; FIXED_PART_SIZE] = unsafe { core::mem::transmute(self.packet) };
+        let fixed = DhcpPacket::to_bytes(self.packet);
         let mut data = heapless::Vec::new();
         data.extend_from_slice(&fixed).unwrap();
         data.extend_from_slice(&self.options).unwrap();

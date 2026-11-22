@@ -1,6 +1,11 @@
 //! The DHCP wire format: message types, the fixed packet header, and the
 //! fields of a client message the server acts on.
 
+#![expect(
+    unsafe_code,
+    reason = "the wire format is a packed struct read and written as bytes; this is the crate's only unsafe module"
+)]
+
 use core::net::Ipv4Addr;
 use leasehund::lease::Hostname;
 use leasehund::options;
@@ -101,14 +106,27 @@ pub fn non_zero(octets: [u8; 4]) -> Option<Ipv4Addr> {
     (!ip.is_unspecified()).then_some(ip)
 }
 
+impl DhcpPacket {
+    /// Serialize this packet to its fixed wire-format bytes.
+    ///
+    /// The DHCP fixed part is `#[repr(C, packed)]` with no padding, so the
+    /// byte array is an exact, valid view of the packet.
+    pub fn to_bytes(self) -> [u8; FIXED_PART_SIZE] {
+        // SAFETY: `DhcpPacket` is `#[repr(C, packed)]` and its size equals
+        // `FIXED_PART_SIZE`, so the transmuted byte array is a valid view of the
+        // packet; no alignment or padding concerns apply.
+        unsafe { core::mem::transmute(self) }
+    }
+}
+
 impl ClientMessage {
     /// Parse and sanity-check a datagram received on the server port.
     pub fn parse(data: &[u8]) -> Option<Self> {
         if data.len() < FIXED_PART_SIZE {
             return None;
         }
-        // SAFETY: read_unaligned handles the packed struct without alignment requirements.
-        // We verified data.len() >= FIXED_PART_SIZE above.
+        // SAFETY: `data` is at least `FIXED_PART_SIZE` bytes (checked above) and may be
+        // unaligned; `read_unaligned` safely reads the packed `DhcpPacket` from it.
         let packet = unsafe { core::ptr::read_unaligned(data.as_ptr().cast::<DhcpPacket>()) };
         if packet.magic != DHCP_MAGIC
             || packet.op != BOOTREQUEST

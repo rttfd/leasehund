@@ -143,6 +143,7 @@
 //! ```
 
 #![no_std]
+#![deny(unsafe_code)]
 
 // Lets the crate refer to itself as `leasehund::`, like its users and doc examples do.
 extern crate self as leasehund;
