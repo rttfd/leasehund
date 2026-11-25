@@ -1,7 +1,7 @@
 [package]
 name = "leasehund"
 version = "0.8.1"
-exclude = [".agentic/"]
+exclude = [".hausmeister/"]
 edition = "2024"
 authors = ["rttf <contact@rttf.dev>"]
 description = "A lightweight, embedded-friendly DHCP server implementation for Rust no_std environments"
